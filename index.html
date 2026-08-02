@@ -463,7 +463,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-02c';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-08-02d';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -913,17 +913,27 @@ let pending = [];
 
 function renderPending() {
   if (!pending.length) { $('pendingBox').innerHTML = ''; return; }
+  // 年月・種別・名称が同じものが複数あると、保存時に潰し合う。
+  // モデルが月を読み違えたときに起きるので、保存前に気づけるようにする。
+  const count = {};
+  pending.forEach(r => { count[recKey(r)] = (count[recKey(r)] || 0) + 1; });
+  const dup = pending.filter(r => count[recKey(r)] > 1).length;
+
   $('pendingBox').innerHTML =
     '<div class="card-title" style="margin:18px 0 10px">読み取り結果（' + pending.length + '件）</div>' +
     pending.map((r, i) => {
       const t = totals(r);
       const items = (r.earnings || []).length + (r.deductions || []).length;
+      const warn = count[recKey(r)] > 1 ? ' <span class="badge warn">重複</span>' : '';
       return '<div class="month-item" data-i="' + i + '">' +
-        '<div><div class="m">' + esc(recTitle(r)) + '</div>' +
+        '<div><div class="m">' + esc(recTitle(r)) + warn + '</div>' +
         '<div class="sub">' + (r.company ? esc(r.company) + ' / ' : '') + items + '項目</div></div>' +
         '<div class="nums"><div class="net">' + yen(t.net) + '</div>' +
         '<div class="gd">支給 ' + yen(t.gross) + ' − 控除 ' + yen(t.deduction) + '</div></div></div>';
     }).join('') +
+    (dup ? '<div class="msg err">年月・種別・名称が同じ明細が ' + dup + '件あります。'
+      + 'このまま保存すると1件だけ残り、他は消えます。読み取り月が違っていないか確認し、'
+      + '各行をタップして修正してください。</div>' : '') +
     '<div class="actions"><button class="primary" id="btnPendAll">すべて保存</button>' +
     '<button id="btnPendDrop">破棄</button></div>' +
     '<div class="hint" style="margin-top:8px">各行をタップすると、その明細を入力タブで確認・修正してから保存できます。</div>';
@@ -938,6 +948,8 @@ function renderPending() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
   $('btnPendAll').onclick = () => {
+    if (dup && !confirm('年月・種別・名称が同じ明細が ' + dup + '件あります。\n\n'
+      + 'このまま保存すると、そのうち1件だけが残り、他は失われます。\n続けますか？')) return;
     pending.forEach(r => { const ex = recOf(recKey(r)); if (ex) r.id = ex.id; upsert(r); });
     const n = pending.length;
     pending = []; renderPending();
