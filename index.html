@@ -256,6 +256,14 @@
           <input type="month" id="fYm">
         </div>
         <div>
+          <label>種別</label>
+          <select id="fKind"></select>
+        </div>
+        <div>
+          <label>名称（任意）</label>
+          <input type="text" id="fLabel" placeholder="夏季賞与・決算賞与 など">
+        </div>
+        <div>
           <label>支給日</label>
           <input type="date" id="fPayDate">
         </div>
@@ -263,6 +271,10 @@
           <label>支給元</label>
           <input type="text" id="fCompany" placeholder="会社名">
         </div>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        同じ月でも<strong>種別か名称が違えば別の明細</strong>として登録できます
+        （例: 7月の給与と7月の賞与）。まったく同じ組み合わせは上書きになります。
       </div>
 
       <div class="sec-head">
@@ -461,6 +473,25 @@ const MODELS = [
 const DEFAULT_MODEL = 'claude-opus-5';
 const CATS = ['earnings', 'deductions', 'attendance'];
 const CAT_LABEL = { earnings: '支給', deductions: '控除', attendance: '勤怠' };
+// 同じ月に給与と賞与が並ぶので、月だけでは一意にならない
+const KINDS = [
+  { v: 'salary', t: '給与' },
+  { v: 'bonus',  t: '賞与' },
+  { v: 'other',  t: '臨時' }
+];
+const KIND_ORDER = { salary: 0, bonus: 1, other: 2 };
+function kindLabel(k) { const x = KINDS.find(y => y.v === k); return x ? x.t : '給与'; }
+function kindOf(k) { return KINDS.some(y => y.v === k) ? k : 'salary'; }
+// レコードの同一性。取込時の上書き判定にも使う
+function recKey(r) { return (r.ym || '') + '|' + kindOf(r.kind) + '|' + (r.label || '').trim(); }
+// 一覧やグラフ用の見出し（給与は種別を出さない）
+function recTitle(r) {
+  const m = Number((r.ym || '').slice(5)) + '月';
+  const k = kindOf(r.kind);
+  const l = (r.label || '').trim();
+  if (k === 'salary' && !l) return m;
+  return m + ' ' + (l || kindLabel(k));
+}
 
 // ---------- state ----------
 let db = load();
@@ -530,10 +561,12 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&a
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const sum = arr => (arr || []).reduce((a, x) => a + num(x.amount), 0);
 
-function recOf(ym) { return db.records.find(r => r.ym === ym) || null; }
+function recOf(key) { return db.records.find(r => recKey(r) === key) || null; }
 function yearRecords(y) {
   return db.records.filter(r => r.ym && r.ym.slice(0, 4) === String(y))
-                   .sort((a, b) => a.ym.localeCompare(b.ym));
+    .sort((a, b) => a.ym.localeCompare(b.ym)
+      || (KIND_ORDER[kindOf(a.kind)] - KIND_ORDER[kindOf(b.kind)])
+      || (a.label || '').localeCompare(b.label || ''));
 }
 function totals(r) {
   const g = num(r.totals && r.totals.gross) || sum(r.earnings);
@@ -593,8 +626,11 @@ function renderList() {
               : r.source === 'import' ? '<span class="badge">JSON</span>' : '';
     const gap = Math.abs(x.gross - x.deduction - x.net) > 1
       ? ' <span class="badge warn">合計不一致</span>' : '';
+    const kind = kindOf(r.kind) !== 'salary'
+      ? ' <span class="badge" style="background:rgba(38,166,154,.18);color:#80cbc4">'
+        + esc(kindLabel(kindOf(r.kind))) + '</span>' : '';
     return '<div class="month-item" data-id="' + r.id + '">' +
-      '<div><div class="m">' + Number(r.ym.slice(5)) + '月 ' + src + gap + '</div>' +
+      '<div><div class="m">' + esc(recTitle(r)) + kind + ' ' + src + gap + '</div>' +
       '<div class="sub">' + (r.company ? esc(r.company) + ' / ' : '') +
       (r.payDate ? esc(r.payDate) + ' 支給 / ' : '') + items + '項目</div></div>' +
       '<div class="nums"><div class="net">' + yen(x.net) + '</div>' +
@@ -671,6 +707,7 @@ function clearForm() {
   formMeta = { source: 'manual', model: '' };
   $('entryTitle').textContent = '明細を入力';
   $('fYm').value = ''; $('fPayDate').value = ''; $('fCompany').value = '';
+  $('fKind').value = 'salary'; $('fLabel').value = '';
   $('fGross').value = ''; $('fDeduction').value = ''; $('fNet').value = '';
   $('fNote').value = '';
   CATS.forEach(c => { containerOf(c).innerHTML = ''; });
@@ -683,8 +720,12 @@ function clearForm() {
 function fillForm(r) {
   editingId = r.id || null;
   formMeta = { source: r.source || 'manual', model: r.model || '' };
-  $('entryTitle').textContent = r.ym ? r.ym + ' の明細' : '明細を入力';
+  $('entryTitle').textContent = r.ym
+    ? r.ym + ' の' + kindLabel(kindOf(r.kind)) + ((r.label || '').trim() ? '（' + r.label.trim() + '）' : '')
+    : '明細を入力';
   $('fYm').value = r.ym || '';
+  $('fKind').value = kindOf(r.kind);
+  $('fLabel').value = r.label || '';
   $('fPayDate').value = r.payDate || '';
   $('fCompany').value = r.company || '';
   const t = r.totals || {};
@@ -717,6 +758,8 @@ $('btnSave').onclick = () => {
   const rec = {
     id: editingId || uid(),
     ym: ym,
+    kind: kindOf($('fKind').value),
+    label: $('fLabel').value.trim(),
     payDate: $('fPayDate').value,
     company: $('fCompany').value.trim(),
     earnings: readRows('earnings'),
@@ -747,7 +790,8 @@ $('btnDelete').onclick = () => {
 };
 
 function upsert(rec) {
-  const j = db.records.findIndex(r => r.ym === rec.ym);
+  // 年月・種別・名称がすべて同じものは同一の明細とみなして差し替える
+  const j = db.records.findIndex(r => recKey(r) === recKey(rec));
   if (j >= 0 && db.records[j].id !== rec.id) rec.id = db.records[j].id;
   const k = db.records.findIndex(r => r.id === rec.id);
   if (k >= 0) db.records[k] = rec; else db.records.push(rec);
@@ -771,11 +815,13 @@ function renderStats() {
 function chartSvg(recs) {
   const W = 860, H = 260, PL = 56, PR = 12, PT = 16, PB = 30;
   const iw = W - PL - PR, ih = H - PT - PB;
+  // 同じ月に複数の明細（給与＋賞与など）があるので合算する
   const data = [];
   for (let m = 1; m <= 12; m++) {
     const ym = year + '-' + String(m).padStart(2, '0');
-    const r = recs.find(x => x.ym === ym);
-    data.push(r ? totals(r) : { gross: 0, net: 0 });
+    data.push(recs.filter(x => x.ym === ym).reduce((a, r) => {
+      const t = totals(r); a.gross += t.gross; a.net += t.net; return a;
+    }, { gross: 0, net: 0 }));
   }
   const max = Math.max(1, ...data.map(d => d.gross), ...data.map(d => d.net));
   const step = iw / 12, bw = Math.min(15, step / 2.8);
@@ -806,9 +852,8 @@ function itemTable(recs, cat) {
     if (it.name && !names.includes(it.name)) names.push(it.name);
   }));
   if (!names.length) return '<div class="empty">項目なし</div>';
-  const months = recs.map(r => Number(r.ym.slice(5)));
   let h = '<table><thead><tr><th>項目</th>' +
-    months.map(m => '<th>' + m + '月</th>').join('') + '<th>合計</th></tr></thead><tbody>';
+    recs.map(r => '<th>' + esc(recTitle(r)) + '</th>').join('') + '<th>合計</th></tr></thead><tbody>';
   names.forEach(nm => {
     let tot = 0, unit = '';
     const cells = recs.map(r => {
@@ -862,6 +907,15 @@ const SCHEMA = {
   type: 'object',
   properties: {
     ym: { type: 'string', description: '対象年月 YYYY-MM 形式' },
+    kind: {
+      type: 'string', enum: ['salary', 'bonus', 'other'],
+      description: '明細の種別。通常の月給なら salary、賞与・ボーナス明細なら bonus、'
+        + 'それ以外の臨時支給（一時金・調整支給など）なら other'
+    },
+    label: {
+      type: 'string',
+      description: '明細に固有の名称があれば書く（例: 夏季賞与、決算賞与）。無ければ空文字'
+    },
     payDate: { type: 'string', description: '支給日 YYYY-MM-DD 形式。不明なら空文字' },
     company: { type: 'string', description: '支給元・会社名。不明なら空文字' },
     earnings: {
@@ -883,7 +937,8 @@ const SCHEMA = {
     },
     note: { type: 'string', description: '読み取れなかった箇所や補足。無ければ空文字' }
   },
-  required: ['ym', 'payDate', 'company', 'earnings', 'deductions', 'attendance', 'totals', 'note'],
+  required: ['ym', 'kind', 'label', 'payDate', 'company',
+             'earnings', 'deductions', 'attendance', 'totals', 'note'],
   additionalProperties: false
 };
 
@@ -895,6 +950,8 @@ const PROMPT = [
   '- 勤怠は数値と単位（日・時間 など）を分けて入れる',
   '- 合計欄（総支給額・控除合計・差引支給額）は totals に入れる。記載が無い項目は 0',
   '- 対象年月は「令和○年○月分」等の記載を西暦 YYYY-MM に変換する。支給日と対象年月が異なる場合、ym は対象月、payDate は支給日',
+  '- 表題が「賞与明細」「賞与支給明細書」等なら kind は bonus。通常の給与明細なら salary。'
+    + 'どちらでもない臨時の支給なら other。「夏季賞与」のような固有の名称があれば label に入れる',
   '- 判読できない文字があれば note に書き、値は 0 にする。推測で数字を埋めない'
 ].join('\n');
 
@@ -970,6 +1027,8 @@ function shapeRecord(o, keepMeta) {
   const r = {
     id: (keepMeta && o.id) ? String(o.id) : uid(),
     ym: String(o.ym || '').slice(0, 7),
+    kind: kindOf(o.kind),
+    label: String(o.label || '').trim(),
     payDate: String(o.payDate || ''),
     company: String(o.company || ''),
     earnings: [], deductions: [], attendance: [],
@@ -998,10 +1057,12 @@ function applyParsed(obj, source, model) {
   const r = normalize(obj);
   r.source = source;
   r.model = model || '';
-  const existing = r.ym ? recOf(r.ym) : null;
+  const existing = r.ym ? recOf(recKey(r)) : null;
   if (existing) r.id = existing.id;
   fillForm(r);
-  if (existing) msg($('totalCheck'), r.ym + ' は既に登録済みです。保存すると上書きされます。', 'info');
+  if (existing) msg($('totalCheck'),
+    esc(r.ym + ' の' + kindLabel(kindOf(r.kind)) + ((r.label || '') ? '（' + r.label + '）' : '')) +
+    ' は既に登録済みです。保存すると上書きされます。別の明細として残す場合は種別か名称を変えてください。', 'info');
 }
 
 $('btnCopySchema').onclick = () => {
@@ -1009,6 +1070,8 @@ $('btnCopySchema').onclick = () => {
 'salary-manager 用の給与明細 JSON。1件なら オブジェクト、複数件なら配列で出力してください。\n\n' +
 '{\n' +
 '  "ym": "2026-07",              // 対象年月 YYYY-MM\n' +
+'  "kind": "salary",             // salary=給与 / bonus=賞与 / other=臨時。表題で判断する\n' +
+'  "label": "",                  // 「夏季賞与」等の固有名称があれば。無ければ ""\n' +
 '  "payDate": "2026-07-25",      // 支給日 YYYY-MM-DD（不明なら ""）\n' +
 '  "company": "株式会社◯◯",\n' +
 '  "earnings":   [{"name": "基本給", "amount": 300000}],     // 支給の小項目（明細の名称のまま）\n' +
@@ -1017,7 +1080,8 @@ $('btnCopySchema').onclick = () => {
 '  "totals": {"gross": 300000, "deduction": 15000, "net": 285000},\n' +
 '  "note": ""                    // 判読できなかった箇所など\n' +
 '}\n\n' +
-'金額はカンマ・円記号を除いた数値のみ。推測で数字を埋めず、読めない箇所は 0 にして note に記載すること。';
+'金額はカンマ・円記号を除いた数値のみ。推測で数字を埋めず、読めない箇所は 0 にして note に記載すること。\n' +
+'同じ月の給与と賞与は別レコードとして両方出力すること（ym が同じでも kind が違えば別物として扱われる）。';
   navigator.clipboard.writeText(text).then(
     () => msg($('jsonMsg'), 'スキーマをコピーしました。Claude Code に画像と一緒に渡してください。', 'ok'),
     () => msg($('jsonMsg'), 'コピーに失敗しました。', 'err'));
@@ -1035,7 +1099,7 @@ $('btnJsonImport').onclick = () => {
     if (!valid.length) { msg($('jsonMsg'), 'ym を持つレコードがありません。', 'err'); return; }
     valid.forEach(o => {
       const r = normalize(o);
-      const ex = recOf(r.ym);
+      const ex = recOf(recKey(r));
       if (ex) r.id = ex.id;
       upsert(r);
     });
@@ -1113,13 +1177,14 @@ $('btnExportJson').onclick = () => {
 };
 
 $('btnExportCsv').onclick = () => {
-  const recs = db.records.slice().sort((a, b) => (a.ym || '').localeCompare(b.ym || ''));
+  const recs = db.records.slice().sort((a, b) => (a.ym || '').localeCompare(b.ym || '')
+    || (KIND_ORDER[kindOf(a.kind)] - KIND_ORDER[kindOf(b.kind)]));
   if (!recs.length) { msg($('dataMsg'), 'データがありません。', 'err'); return; }
   const names = { earnings: [], deductions: [], attendance: [] };
   recs.forEach(r => CATS.forEach(c => (r[c] || []).forEach(it => {
     if (it.name && !names[c].includes(it.name)) names[c].push(it.name);
   })));
-  const head = ['年月', '支給日', '支給元']
+  const head = ['年月', '種別', '名称', '支給日', '支給元']
     .concat(names.earnings.map(n => '支給:' + n))
     .concat(names.deductions.map(n => '控除:' + n))
     .concat(names.attendance.map(n => '勤怠:' + n))
@@ -1129,7 +1194,7 @@ $('btnExportCsv').onclick = () => {
   recs.forEach(r => {
     const t = totals(r);
     const cell = (c, n) => { const it = (r[c] || []).find(x => x.name === n); return it ? num(it.amount) : ''; };
-    lines.push([r.ym, r.payDate, r.company]
+    lines.push([r.ym, kindLabel(kindOf(r.kind)), r.label || '', r.payDate, r.company]
       .concat(names.earnings.map(n => cell('earnings', n)))
       .concat(names.deductions.map(n => cell('deductions', n)))
       .concat(names.attendance.map(n => cell('attendance', n)))
@@ -1465,6 +1530,7 @@ function renderAll() {
   renderList();
   if (!$('view-stats').classList.contains('hidden')) renderStats();
 }
+$('fKind').innerHTML = KINDS.map(k => '<option value="' + k.v + '">' + k.t + '</option>').join('');
 clearForm();
 renderDatalists();
 renderImportHint();
