@@ -325,7 +325,8 @@
       <div class="card-title">給与明細画像から自動入力</div>
       <div class="drop" id="drop">
         画像をドラッグ＆ドロップ / タップして選択<br>
-        <span style="font-size:11px">JPEG・PNG・WebP／複数ページ可</span>
+        <span style="font-size:11px">JPEG・PNG・WebP<br>
+        同じ明細のページ違いは1件に統合、別々の明細は件数ぶん登録されます</span>
       </div>
       <input type="file" id="fileInput" accept="image/*" multiple class="hidden">
       <div class="thumbs" id="thumbs"></div>
@@ -334,6 +335,7 @@
         <button id="btnClearImg" disabled>画像をクリア</button>
       </div>
       <div id="importMsg"></div>
+      <div id="pendingBox"></div>
       <div class="hint" id="importHint"></div>
     </div>
 
@@ -451,6 +453,8 @@
       <input type="file" id="restoreInput" accept="application/json,.json" class="hidden">
       <div id="dataMsg"></div>
     </div>
+
+    <div class="hint" style="text-align:center">バージョン <code id="buildTag"></code></div>
   </div>
 
 </div>
@@ -459,6 +463,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
+const BUILD = '2026-08-02c';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -903,7 +908,47 @@ function renderThumbs() {
 }
 $('btnClearImg').onclick = () => { images = []; renderThumbs(); msg($('importMsg'), ''); };
 
-const SCHEMA = {
+// 1回の読み取りで複数の明細が返ったときの控え
+let pending = [];
+
+function renderPending() {
+  if (!pending.length) { $('pendingBox').innerHTML = ''; return; }
+  $('pendingBox').innerHTML =
+    '<div class="card-title" style="margin:18px 0 10px">読み取り結果（' + pending.length + '件）</div>' +
+    pending.map((r, i) => {
+      const t = totals(r);
+      const items = (r.earnings || []).length + (r.deductions || []).length;
+      return '<div class="month-item" data-i="' + i + '">' +
+        '<div><div class="m">' + esc(recTitle(r)) + '</div>' +
+        '<div class="sub">' + (r.company ? esc(r.company) + ' / ' : '') + items + '項目</div></div>' +
+        '<div class="nums"><div class="net">' + yen(t.net) + '</div>' +
+        '<div class="gd">支給 ' + yen(t.gross) + ' − 控除 ' + yen(t.deduction) + '</div></div></div>';
+    }).join('') +
+    '<div class="actions"><button class="primary" id="btnPendAll">すべて保存</button>' +
+    '<button id="btnPendDrop">破棄</button></div>' +
+    '<div class="hint" style="margin-top:8px">各行をタップすると、その明細を入力タブで確認・修正してから保存できます。</div>';
+
+  $('pendingBox').querySelectorAll('.month-item').forEach(el => el.onclick = () => {
+    const r = pending.splice(Number(el.dataset.i), 1)[0];
+    renderPending();
+    const ex = recOf(recKey(r));
+    if (ex) r.id = ex.id;
+    fillForm(r);
+    goTab('entry');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+  $('btnPendAll').onclick = () => {
+    pending.forEach(r => { const ex = recOf(recKey(r)); if (ex) r.id = ex.id; upsert(r); });
+    const n = pending.length;
+    pending = []; renderPending();
+    touch(); renderAll();
+    msg($('importMsg'), n + '件を保存しました。', 'ok');
+    goTab('list');
+  };
+  $('btnPendDrop').onclick = () => { pending = []; renderPending(); msg($('importMsg'), ''); };
+}
+
+const RECORD_SCHEMA = {
   type: 'object',
   properties: {
     ym: { type: 'string', description: '対象年月 YYYY-MM 形式' },
@@ -942,8 +987,29 @@ const SCHEMA = {
   additionalProperties: false
 };
 
+// 渡した画像に明細が何通含まれるかは事前に分からないので、常に配列で受け取る。
+// 同じ明細の複数ページなら1件、別々の明細なら件数ぶん返させる。
+const SCHEMA = {
+  type: 'object',
+  properties: {
+    records: {
+      type: 'array',
+      description: '画像に含まれる明細。1通につき1要素',
+      items: RECORD_SCHEMA
+    }
+  },
+  required: ['records'],
+  additionalProperties: false
+};
+
 const PROMPT = [
-  'この画像は日本の給与明細です。記載内容をすべて読み取り、指定のJSON形式で出力してください。',
+  'これらの画像は日本の給与明細です。記載内容をすべて読み取り、指定のJSON形式で出力してください。',
+  '',
+  '【最初に判断すること】渡された画像が「1通の明細を複数ページに分けたもの」か、',
+  '「別々の明細（例: 給与明細と賞与明細、別々の月の明細）」かを見分けてください。',
+  '- 1通の明細のページ違いなら、統合して records に1件だけ出力する',
+  '- 別々の明細なら、明細の数だけ records に要素を出力する（勝手に合算しない）',
+  '- 対象年月・種別・支給日・合計額のいずれかが食い違えば、別々の明細と判断する',
   '',
   '- 支給・控除・勤怠の各欄にある小項目を、明細に書かれている名称のまま漏れなく列挙する',
   '- 金額はカンマや円記号を除いた数値のみ。控除額は正の数で表す',
@@ -1002,16 +1068,33 @@ $('btnAnalyze').onclick = async () => {
     const parsed = JSON.parse(block.text);
 
     const used = data.model || useModel;
-    applyParsed(parsed, 'ai', used);
+    const list = Array.isArray(parsed.records) ? parsed.records.filter(o => o && o.ym) : [];
+    if (!list.length) throw new Error('明細を読み取れませんでした。画像が鮮明か確認してください。');
+
     const u = data.usage || {};
-    msg($('importMsg'), esc(modelShort(used)) +
-      ' が読み取りました。入力タブで内容を確認して保存してください。' +
-      (modelMeta(used).hires ? '' : '<br>低解像度モデルのため、<b>数字を1桁ずつ突き合わせてから</b>保存してください。') +
-      (u.input_tokens ? '<br><span style="opacity:.7">tokens: in ' + u.input_tokens +
-        ' / out ' + (u.output_tokens || 0) + '（約' + estCost(used, u) + '）</span>' : ''),
-      modelMeta(used).hires ? 'ok' : 'err');
+    const cost = u.input_tokens
+      ? '<br><span style="opacity:.7">tokens: in ' + u.input_tokens + ' / out ' +
+        (u.output_tokens || 0) + '（約' + estCost(used, u) + '）</span>' : '';
+    const caution = modelMeta(used).hires ? ''
+      : '<br>低解像度モデルのため、<b>数字を1桁ずつ突き合わせてから</b>保存してください。';
+
     images = []; renderThumbs();
-    goTab('entry');
+
+    if (list.length === 1) {
+      applyParsed(list[0], 'ai', used);
+      pending = []; renderPending();
+      msg($('importMsg'), esc(modelShort(used)) +
+        ' が読み取りました。入力タブで内容を確認して保存してください。' + caution + cost,
+        modelMeta(used).hires ? 'ok' : 'err');
+      goTab('entry');
+    } else {
+      // 別々の明細が複数含まれていた。1件ずつ確認できるよう控えておく
+      pending = list.map(o => { const r = normalize(o); r.source = 'ai'; r.model = used; return r; });
+      renderPending();
+      msg($('importMsg'), esc(modelShort(used)) + ' が <b>' + list.length +
+        '件の明細</b>として読み取りました。下で内容を確認してください。' + caution + cost,
+        modelMeta(used).hires ? 'ok' : 'err');
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (err) {
     msg($('importMsg'), esc(err.message || String(err)) +
@@ -1531,6 +1614,7 @@ function renderAll() {
   if (!$('view-stats').classList.contains('hidden')) renderStats();
 }
 $('fKind').innerHTML = KINDS.map(k => '<option value="' + k.v + '">' + k.t + '</option>').join('');
+$('buildTag').textContent = BUILD;
 clearForm();
 renderDatalists();
 renderImportHint();
