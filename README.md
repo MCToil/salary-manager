@@ -1,16 +1,22 @@
 # 給与管理 (salary-manager)
 
-給与明細を月ごとに管理する単一 HTML アプリ。データは端末の localStorage に保存され、外部サーバには送信されません（画像解析時の api.anthropic.com を除く）。
+**https://mctoil.github.io/salary-manager/**
+
+給与明細を月ごとに管理する単一 HTML アプリ。データは端末の localStorage に保存され、外部サーバには送信されません（画像解析時の api.anthropic.com、同期時の api.github.com を除く）。
 
 ## 起動
 
-`index.html` をブラウザで直接開くか、ローカルサーバ経由で開きます。
+上のアドレスを開くだけです。iPhone では Safari で開いて「ホーム画面に追加」しておくと、アプリのように使えます。
+
+ローカルで動かす場合は `index.html` を直接開くか、次を実行します。
 
 ```bash
 python3 serve.py
 ```
 
 → http://localhost:3500
+
+データは端末・オリジンごとに保存されるので、公開アドレスとローカルは別のデータになります。両方で使う場合は同期の設定をそれぞれに入れてください。
 
 ## 機能
 
