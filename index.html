@@ -447,11 +447,16 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
+// effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
+// hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
-  { id: 'claude-opus-5', label: 'Claude Opus 5（推奨）', short: 'Opus 5',
+  { id: 'claude-opus-5', label: 'Claude Opus 5（推奨）', short: 'Opus 5', effort: true, hires: true,
     note: '$5 / $25 per MTok。明細1枚あたり9円前後。読み取り精度優先。' },
-  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', short: 'Sonnet 5',
-    note: '$2 / $10 per MTok（2026-08-31まで。以降 $3 / $15）。明細1枚あたり4円前後。' }
+  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', short: 'Sonnet 5', effort: true, hires: true,
+    note: '$2 / $10 per MTok（2026-08-31まで。以降 $3 / $15）。明細1枚あたり4円前後。' },
+  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5（実験用）', short: 'Haiku 4.5', effort: false, hires: false,
+    note: '$1 / $5 per MTok。明細1枚あたり1円前後。ただし画像が長辺1568pxに縮小されるため、'
+        + '小さな文字や桁の読み違いが起きやすい。保存前に必ず数字を確認してください。' }
 ];
 const DEFAULT_MODEL = 'claude-opus-5';
 const CATS = ['earnings', 'deductions', 'attendance'];
@@ -480,11 +485,15 @@ function modelShort(id) {
   const m = MODELS.find(x => x.id === id);
   return m ? m.short : (id || '');
 }
+function modelMeta(id) {
+  return MODELS.find(x => x.id === id) || MODELS[0];
+}
 // Sonnet 5 は 2026-08-31 まで導入価格 $2/$10、以降 $3/$15
 function rateOf(id) {
   if (id === 'claude-sonnet-5') {
     return new Date() < new Date('2026-09-01T00:00:00Z') ? { in: 2, out: 10 } : { in: 3, out: 15 };
   }
+  if (id === 'claude-haiku-4-5') return { in: 1, out: 5 };
   return { in: 5, out: 25 };
 }
 function estCost(id, u) {
@@ -916,7 +925,10 @@ $('btnAnalyze').onclick = async () => {
       body: JSON.stringify({
         model: useModel,
         max_tokens: 16000,
-        output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } },
+        // effort 非対応のモデル（Haiku 4.5）に送ると 400 になるので付けない
+        output_config: modelMeta(useModel).effort
+          ? { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } }
+          : { format: { type: 'json_schema', schema: SCHEMA } },
         messages: [{ role: 'user', content: content }]
       })
     });
@@ -932,12 +944,15 @@ $('btnAnalyze').onclick = async () => {
     if (!block) throw new Error('応答にテキストが含まれていません。');
     const parsed = JSON.parse(block.text);
 
-    applyParsed(parsed, 'ai', data.model || useModel);
+    const used = data.model || useModel;
+    applyParsed(parsed, 'ai', used);
     const u = data.usage || {};
-    msg($('importMsg'), esc(modelShort(data.model || useModel)) +
+    msg($('importMsg'), esc(modelShort(used)) +
       ' が読み取りました。入力タブで内容を確認して保存してください。' +
+      (modelMeta(used).hires ? '' : '<br>低解像度モデルのため、<b>数字を1桁ずつ突き合わせてから</b>保存してください。') +
       (u.input_tokens ? '<br><span style="opacity:.7">tokens: in ' + u.input_tokens +
-        ' / out ' + (u.output_tokens || 0) + '（約' + estCost(data.model || useModel, u) + '）</span>' : ''), 'ok');
+        ' / out ' + (u.output_tokens || 0) + '（約' + estCost(used, u) + '）</span>' : ''),
+      modelMeta(used).hires ? 'ok' : 'err');
     images = []; renderThumbs();
     goTab('entry');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1063,8 +1078,10 @@ function renderSettings() {
 }
 
 function renderModelNote() {
-  const m = MODELS.find(x => x.id === modelId());
-  $('modelNote').innerHTML = m ? '<code>' + m.id + '</code> — ' + esc(m.note) : '';
+  const m = modelMeta(modelId());
+  const body = '<code>' + m.id + '</code> — ' + esc(m.note);
+  $('modelNote').innerHTML = m.hires ? body
+    : '<div class="msg err" style="margin-top:10px">' + body + '</div>';
 }
 function renderImportHint() {
   $('importHint').innerHTML = db.settings.apiKey
