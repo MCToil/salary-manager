@@ -276,6 +276,7 @@
         同じ月でも<strong>種別か名称が違えば別の明細</strong>として登録できます
         （例: 7月の給与と7月の賞与）。まったく同じ組み合わせは上書きになります。
       </div>
+      <div id="dupCheck"></div>
 
       <div class="sec-head">
         <h3>支給<span class="amt" id="sumEarn">¥0</span></h3>
@@ -463,7 +464,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-02d';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-08-02e';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -700,6 +701,33 @@ function updateSums() {
 }
 ['fGross', 'fDeduction', 'fNet'].forEach(id => $(id).addEventListener('input', updateSums));
 
+// 年月・種別・名称が既存の明細とぶつかっていないか、変更のたびに確かめる。
+// 画像取込でモデルが種別を外したときに、ここで気づいて直せるようにする。
+function checkDup() {
+  const ym = $('fYm').value;
+  if (!ym) { msg($('dupCheck'), ''); return; }
+  const probe = { ym: ym, kind: kindOf($('fKind').value), label: $('fLabel').value.trim() };
+  const ex = db.records.find(r => recKey(r) === recKey(probe) && r.id !== editingId);
+  if (!ex) { msg($('dupCheck'), ''); return; }
+  const t = totals(ex);
+  msg($('dupCheck'),
+    '<b>' + esc(ym + ' の' + kindLabel(probe.kind) + (probe.label ? '（' + probe.label + '）' : '')) +
+    '</b> は既に登録済みです（手取り ' + yen(t.net) + '）。<br>' +
+    'このまま保存すると<b>その明細を上書き</b>します。別の明細として残すなら種別か名称を変えてください。' +
+    '<div style="margin-top:9px;display:flex;gap:6px;flex-wrap:wrap">' +
+    (probe.kind !== 'bonus' ? '<button class="mini" data-k="bonus">賞与にする</button>' : '') +
+    (probe.kind !== 'other' ? '<button class="mini" data-k="other">臨時にする</button>' : '') +
+    (probe.kind !== 'salary' ? '<button class="mini" data-k="salary">給与にする</button>' : '') +
+    '</div>', 'err');
+  $('dupCheck').querySelectorAll('button[data-k]').forEach(b => b.onclick = () => {
+    $('fKind').value = b.dataset.k;
+    checkDup();
+  });
+}
+['fYm', 'fLabel'].forEach(id => $(id).addEventListener('input', checkDup));
+$('fYm').addEventListener('change', checkDup);
+$('fKind').addEventListener('change', checkDup);
+
 function renderDatalists() {
   const map = { earnings: 'dlEarnings', deductions: 'dlDeductions', attendance: 'dlAttendance' };
   CATS.forEach(c => {
@@ -720,6 +748,7 @@ function clearForm() {
   addRow('attendance', null);
   $('btnDelete').classList.add('hidden');
   msg($('totalCheck'), '');
+  msg($('dupCheck'), '');
   updateSums();
 }
 function fillForm(r) {
@@ -746,6 +775,7 @@ function fillForm(r) {
   $('btnDelete').classList.toggle('hidden', !editingId);
   renderDatalists();
   updateSums();
+  checkDup();
 }
 function editRecord(id) {
   const r = db.records.find(x => x.id === id);
@@ -941,16 +971,14 @@ function renderPending() {
   $('pendingBox').querySelectorAll('.month-item').forEach(el => el.onclick = () => {
     const r = pending.splice(Number(el.dataset.i), 1)[0];
     renderPending();
-    const ex = recOf(recKey(r));
-    if (ex) r.id = ex.id;
-    fillForm(r);
+    fillForm(r);   // 衝突は checkDup が知らせる。上書きは upsert がキーで判断する
     goTab('entry');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
   $('btnPendAll').onclick = () => {
     if (dup && !confirm('年月・種別・名称が同じ明細が ' + dup + '件あります。\n\n'
       + 'このまま保存すると、そのうち1件だけが残り、他は失われます。\n続けますか？')) return;
-    pending.forEach(r => { const ex = recOf(recKey(r)); if (ex) r.id = ex.id; upsert(r); });
+    pending.forEach(r => upsert(r));   // 同じキーの既存レコードは upsert が差し替える
     const n = pending.length;
     pending = []; renderPending();
     touch(); renderAll();
@@ -1028,8 +1056,13 @@ const PROMPT = [
   '- 勤怠は数値と単位（日・時間 など）を分けて入れる',
   '- 合計欄（総支給額・控除合計・差引支給額）は totals に入れる。記載が無い項目は 0',
   '- 対象年月は「令和○年○月分」等の記載を西暦 YYYY-MM に変換する。支給日と対象年月が異なる場合、ym は対象月、payDate は支給日',
-  '- 表題が「賞与明細」「賞与支給明細書」等なら kind は bonus。通常の給与明細なら salary。'
-    + 'どちらでもない臨時の支給なら other。「夏季賞与」のような固有の名称があれば label に入れる',
+  '- kind の判定は慎重に行う。次のいずれかに当てはまれば bonus とする:',
+  '  ・表題や見出しに「賞与」「ボーナス」「一時金」「期末手当」「決算手当」等がある',
+  '  ・支給欄が「賞与」など単一の大きな金額が中心で、基本給・残業手当といった月給の構成になっていない',
+  '  ・勤怠欄（出勤日数・労働時間）が無い、または空になっている',
+  '  表題が「給与支給明細書」であっても、中身が上記に当てはまれば bonus と判断すること。',
+  '  月給の構成（基本給＋各種手当）で勤怠欄があるものだけを salary とする。',
+  '  どちらでもない臨時の支給は other。「夏季賞与」のような固有の名称があれば label に入れる',
   '- 判読できない文字があれば note に書き、値は 0 にする。推測で数字を埋めない'
 ].join('\n');
 
@@ -1152,12 +1185,9 @@ function applyParsed(obj, source, model) {
   const r = normalize(obj);
   r.source = source;
   r.model = model || '';
-  const existing = r.ym ? recOf(recKey(r)) : null;
-  if (existing) r.id = existing.id;
-  fillForm(r);
-  if (existing) msg($('totalCheck'),
-    esc(r.ym + ' の' + kindLabel(kindOf(r.kind)) + ((r.label || '') ? '（' + r.label + '）' : '')) +
-    ' は既に登録済みです。保存すると上書きされます。別の明細として残す場合は種別か名称を変えてください。', 'info');
+  // 既存レコードの id はここでは引き継がない。id を借りると editingId が
+  // 一致して重複警告が出なくなる。上書き自体は upsert がキーで面倒を見る。
+  fillForm(r);   // fillForm 内の checkDup が衝突を知らせる
 }
 
 $('btnCopySchema').onclick = () => {
