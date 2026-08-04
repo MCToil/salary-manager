@@ -124,6 +124,61 @@
 
   .empty { color: var(--text-dim); font-size: 13px; text-align: center; padding: 28px 0; }
 
+  /* ---------- 月の内訳 ---------- */
+  .rec {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 10px; margin-bottom: 8px; overflow: hidden;
+  }
+  .rec.open { border-color: var(--accent); }
+  .rec-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 13px 14px; cursor: pointer; user-select: none;
+  }
+  .rec-head:hover { background: rgba(92,107,192,.07); }
+  .rec-head .m { font-size: 15px; font-weight: 600; }
+  .rec-head .sub { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+  .rec-head .nums { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .rec-head .net { font-size: 17px; font-weight: 700; color: var(--pay); }
+  .rec-head .gd { font-size: 11px; color: var(--text-dim); }
+  /* inline のままだと transform が効かないので inline-block にする */
+  .caret { display: inline-block; color: var(--text-dim); font-size: 11px; transition: transform .15s; }
+  .rec.open .caret { transform: rotate(90deg); }
+
+  /* 手取りと控除の比率 */
+  .split { display: flex; height: 7px; margin: 0 14px 13px; border-radius: 4px; overflow: hidden; background: var(--border); }
+  .split i { display: block; height: 100%; }
+  .split .s-net { background: var(--pay); }
+  .split .s-ded { background: var(--ded); }
+
+  .rec-body { padding: 14px; border-top: 1px solid var(--border); }
+  .brk + .brk { margin-top: 16px; }
+  .brk h4 {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; font-weight: 600; letter-spacing: 1px;
+    color: var(--text-dim); margin-bottom: 9px;
+  }
+  .brk h4 b { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .brk-row {
+    display: grid; grid-template-columns: minmax(72px, 96px) 1fr minmax(78px, auto);
+    gap: 9px; align-items: center; font-size: 12px; margin-bottom: 6px;
+  }
+  .brk-row > span:first-child {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim);
+  }
+  .brk-track { height: 6px; border-radius: 3px; background: rgba(255,255,255,.05); overflow: hidden; }
+  .brk-track i { display: block; height: 100%; border-radius: 3px; }
+  .brk-row > b { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .att-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .att-chips span {
+    background: rgba(255,255,255,.05); border-radius: 999px;
+    padding: 5px 11px; font-size: 12px;
+  }
+  .att-chips b { font-variant-numeric: tabular-nums; }
+  .rec-acts { display: flex; gap: 7px; margin-top: 16px; }
+  @media (max-width: 420px) {
+    .brk-row { grid-template-columns: minmax(64px, 84px) 1fr auto; gap: 7px; font-size: 11px; }
+  }
+
   .kpi { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   .kpi div { background: var(--surface2); border-radius: 10px; padding: 14px; text-align: center; }
   .kpi .k { font-size: 10px; color: var(--text-dim); letter-spacing: 1px; margin-bottom: 6px; }
@@ -464,7 +519,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-02e';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-08-02f';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -625,26 +680,77 @@ function renderList() {
     $('monthList').innerHTML = '<div class="empty">' + year + '年のデータはまだありません</div>';
     return;
   }
-  $('monthList').innerHTML = recs.map(r => {
-    const x = totals(r);
-    const items = (r.earnings || []).length + (r.deductions || []).length;
-    const src = r.source === 'ai' ? '<span class="badge ai">' + esc(modelShort(r.model) || 'AI取込') + '</span>'
-              : r.source === 'import' ? '<span class="badge">JSON</span>' : '';
-    const gap = Math.abs(x.gross - x.deduction - x.net) > 1
-      ? ' <span class="badge warn">合計不一致</span>' : '';
-    const kind = kindOf(r.kind) !== 'salary'
-      ? ' <span class="badge" style="background:rgba(38,166,154,.18);color:#80cbc4">'
-        + esc(kindLabel(kindOf(r.kind))) + '</span>' : '';
-    return '<div class="month-item" data-id="' + r.id + '">' +
-      '<div><div class="m">' + esc(recTitle(r)) + kind + ' ' + src + gap + '</div>' +
-      '<div class="sub">' + (r.company ? esc(r.company) + ' / ' : '') +
-      (r.payDate ? esc(r.payDate) + ' 支給 / ' : '') + items + '項目</div></div>' +
-      '<div class="nums"><div class="net">' + yen(x.net) + '</div>' +
-      '<div class="gd">支給 ' + yen(x.gross) + ' − 控除 ' + yen(x.deduction) + '</div></div></div>';
-  }).join('');
+  $('monthList').innerHTML = recs.map(r => recCard(r)).join('');
 
-  $('monthList').querySelectorAll('.month-item').forEach(el =>
-    el.addEventListener('click', () => { editRecord(el.dataset.id); }));
+  $('monthList').querySelectorAll('.rec-head').forEach(el => el.onclick = () => {
+    const id = el.parentElement.dataset.id;
+    if (opened.has(id)) opened.delete(id); else opened.add(id);
+    renderList();
+  });
+  $('monthList').querySelectorAll('[data-edit]').forEach(b =>
+    b.onclick = e => { e.stopPropagation(); editRecord(b.dataset.edit); });
+}
+
+// 展開中の明細（一覧を描き直しても開いたままにする）
+const opened = new Set();
+
+function recCard(r) {
+  const x = totals(r);
+  const open = opened.has(r.id);
+  const src = r.source === 'ai' ? '<span class="badge ai">' + esc(modelShort(r.model) || 'AI取込') + '</span>'
+            : r.source === 'import' ? '<span class="badge">JSON</span>' : '';
+  const gap = Math.abs(x.gross - x.deduction - x.net) > 1
+    ? ' <span class="badge warn">合計不一致</span>' : '';
+  const kind = kindOf(r.kind) !== 'salary'
+    ? ' <span class="badge" style="background:rgba(38,166,154,.18);color:#80cbc4">'
+      + esc(kindLabel(kindOf(r.kind))) + '</span>' : '';
+  const items = (r.earnings || []).length + (r.deductions || []).length;
+  // 総支給に占める手取りと控除の比率
+  const pn = x.gross > 0 ? Math.max(0, Math.min(100, x.net / x.gross * 100)) : 0;
+
+  return '<div class="rec' + (open ? ' open' : '') + '" data-id="' + r.id + '">' +
+    '<div class="rec-head">' +
+      '<div style="min-width:0"><div class="m"><span class="caret">▶</span> ' +
+        esc(recTitle(r)) + kind + ' ' + src + gap + '</div>' +
+        '<div class="sub">' + (r.company ? esc(r.company) + ' / ' : '') +
+        (r.payDate ? esc(r.payDate) + ' 支給 / ' : '') + items + '項目</div></div>' +
+      '<div class="nums"><div class="net">' + yen(x.net) + '</div>' +
+      '<div class="gd">支給 ' + yen(x.gross) + ' − 控除 ' + yen(x.deduction) + '</div></div>' +
+    '</div>' +
+    '<div class="split" title="手取り ' + yen(x.net) + ' / 控除 ' + yen(x.deduction) + '">' +
+      '<i class="s-net" style="width:' + pn.toFixed(1) + '%"></i>' +
+      '<i class="s-ded" style="width:' + (100 - pn).toFixed(1) + '%"></i></div>' +
+    (open ? '<div class="rec-body">' +
+      brkSection('支給', r.earnings, x.gross, 'var(--pay)') +
+      brkSection('控除', r.deductions, x.deduction, 'var(--ded)') +
+      attSection(r.attendance) +
+      (r.note ? '<div class="hint" style="margin-top:14px">' + esc(r.note) + '</div>' : '') +
+      '<div class="rec-acts"><button class="primary" data-edit="' + r.id + '">編集</button></div>' +
+      '</div>' : '') +
+    '</div>';
+}
+
+function brkSection(title, list, total, color) {
+  const rows = (list || []).filter(it => it.name || num(it.amount));
+  if (!rows.length) return '';
+  const max = Math.max(1, ...rows.map(it => Math.abs(num(it.amount))));
+  return '<div class="brk"><h4><span>' + title + '</span><b>' + yen(total) + '</b></h4>' +
+    rows.map(it => {
+      const v = Math.abs(num(it.amount));
+      return '<div class="brk-row"><span>' + esc(it.name || '（無題）') + '</span>' +
+        '<div class="brk-track"><i style="width:' + (v / max * 100).toFixed(1) +
+        '%;background:' + color + '"></i></div>' +
+        '<b>' + yen(num(it.amount)) + '</b></div>';
+    }).join('') + '</div>';
+}
+
+function attSection(list) {
+  const rows = (list || []).filter(it => it.name);
+  if (!rows.length) return '';
+  return '<div class="brk"><h4><span>勤怠</span></h4><div class="att-chips">' +
+    rows.map(it => '<span>' + esc(it.name) + ' <b>' +
+      (Math.round(num(it.amount) * 100) / 100) + esc(it.unit || '') + '</b></span>').join('') +
+    '</div></div>';
 }
 
 // ---------- 入力フォーム ----------
