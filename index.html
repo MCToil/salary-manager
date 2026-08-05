@@ -519,7 +519,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-02f';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-08-02g';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -561,17 +561,37 @@ let editingId = null;
 let images = [];   // {name, mediaType, b64, url}
 let formMeta = { source: 'manual', model: '' };   // 編集中レコードの由来
 
+// 端末ごとの設定（API キー・モデル）は明細とは別のキーに置く。
+// 同じ塊に同居させると、更新前から開いたままの古いタブが保存した瞬間に
+// その古い内容で丸ごと上書きされ、API キーまで巻き戻ってしまう。
+const SKEY = 'salary-manager-settings';
+function settings() {
+  try {
+    const d = JSON.parse(localStorage.getItem(SKEY) || 'null');
+    if (d && typeof d === 'object') {
+      return { apiKey: String(d.apiKey || ''), model: String(d.model || DEFAULT_MODEL) };
+    }
+  } catch (e) { /* 壊れていれば初期値 */ }
+  return { apiKey: '', model: DEFAULT_MODEL };
+}
+// 常に保存済みの内容を読み直してから1項目だけ差し替える
+function setSetting(k, v) {
+  const s = settings();
+  s[k] = v;
+  try { localStorage.setItem(SKEY, JSON.stringify(s)); } catch (e) { /* 保存できなくても継続 */ }
+}
+
 function blank() {
   return {
     version: 1,
     updatedAt: '',
-    settings: { apiKey: '', model: DEFAULT_MODEL },
     records: [],
     master: { earnings: [], deductions: [], attendance: [] }
   };
 }
 function modelId() {
-  return MODELS.some(m => m.id === db.settings.model) ? db.settings.model : DEFAULT_MODEL;
+  const m = settings().model;
+  return MODELS.some(x => x.id === m) ? m : DEFAULT_MODEL;
 }
 function modelShort(id) {
   const m = MODELS.find(x => x.id === id);
@@ -598,7 +618,14 @@ function load() {
     if (!raw) return blank();
     const d = JSON.parse(raw);
     const b = blank();
-    d.settings = Object.assign(b.settings, d.settings || {});
+    // 旧版は設定を同じ塊に入れていた。初回だけ専用キーへ移す
+    if (d.settings && !localStorage.getItem(SKEY)) {
+      localStorage.setItem(SKEY, JSON.stringify({
+        apiKey: String(d.settings.apiKey || ''),
+        model: String(d.settings.model || DEFAULT_MODEL)
+      }));
+    }
+    delete d.settings;
     d.master = Object.assign(b.master, d.master || {});
     d.records = Array.isArray(d.records) ? d.records : [];
     d.updatedAt = typeof d.updatedAt === 'string' ? d.updatedAt : '';
@@ -609,9 +636,23 @@ function load() {
 function save() { localStorage.setItem(KEY, JSON.stringify(db)); }
 // touch(): 明細・マスタを変えたとき。updatedAt を進めて同期を予約する
 function touch() {
+  // 別のタブが先に更新していたら、こちらの古い内容で潰さない
+  if (staleAgainstStorage()) {
+    alert('別のタブ（または更新前の画面）でデータが変更されています。\n\n'
+        + 'このまま保存すると、そちらの変更が失われます。\n'
+        + 'この画面を再読み込みしてから操作し直してください。');
+    return;
+  }
   db.updatedAt = new Date().toISOString();
   save();
   scheduleSync();
+}
+function staleAgainstStorage() {
+  try {
+    const d = JSON.parse(localStorage.getItem(KEY) || 'null');
+    return !!(d && typeof d.updatedAt === 'string' && d.updatedAt && db.updatedAt
+              && d.updatedAt > db.updatedAt);
+  } catch (e) { return false; }
 }
 
 // ---------- helpers ----------
@@ -1173,7 +1214,7 @@ const PROMPT = [
 ].join('\n');
 
 $('btnAnalyze').onclick = async () => {
-  const key = (db.settings.apiKey || '').trim();
+  const key = settings().apiKey.trim();
   if (!key) { msg($('importMsg'), 'API キーが未設定です。設定タブで登録するか、下の JSON 取込を使ってください。', 'err'); return; }
   if (!images.length) return;
 
@@ -1351,7 +1392,7 @@ $('btnJsonImport').onclick = () => {
 // ---------- 設定 ----------
 function renderSettings() {
   fillSyncForm();
-  $('fApiKey').value = db.settings.apiKey || '';
+  $('fApiKey').value = settings().apiKey;
   $('fModel').innerHTML = MODELS.map(m =>
     '<option value="' + m.id + '"' + (m.id === modelId() ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('');
   renderModelNote();
@@ -1379,25 +1420,24 @@ function renderModelNote() {
     : '<div class="msg err" style="margin-top:10px">' + body + '</div>';
 }
 function renderImportHint() {
-  $('importHint').innerHTML = db.settings.apiKey
+  $('importHint').innerHTML = settings().apiKey
     ? '使用モデル: <code>' + esc(modelId()) + '</code>（設定タブで変更できます）。'
     : '設定タブで Anthropic API キーを登録すると、ここから直接 Claude が画像を読み取って' +
       '小項目まで自動で作成します。キーが無い場合は下の JSON 取込を使ってください。';
 }
 $('fModel').onchange = () => {
-  db.settings.model = $('fModel').value;
-  save();
+  setSetting('model', $('fModel').value);
   renderModelNote();
   renderImportHint();
 };
 
 $('btnSaveKey').onclick = () => {
-  db.settings.apiKey = $('fApiKey').value.trim();
-  save(); renderImportHint();
-  msg($('keyMsg'), db.settings.apiKey ? 'API キーを保存しました。' : 'API キーを空にしました。', 'ok');
+  const v = $('fApiKey').value.trim();
+  setSetting('apiKey', v); renderImportHint();
+  msg($('keyMsg'), v ? 'API キーを保存しました。' : 'API キーを空にしました。', 'ok');
 };
 $('btnDelKey').onclick = () => {
-  db.settings.apiKey = ''; $('fApiKey').value = ''; save(); renderImportHint();
+  setSetting('apiKey', ''); $('fApiKey').value = ''; renderImportHint();
   msg($('keyMsg'), 'API キーを削除しました。', 'ok');
 };
 
@@ -1466,6 +1506,7 @@ $('btnWipe').onclick = () => {
   if (!confirm('本当に削除しますか？')) return;
   db = blank();
   save();                       // touch() しない = クラウドを消さない
+  localStorage.removeItem(SKEY);
   sync.lastSyncedAt = '';       // 次回はクラウド側だけが変更ありと判定される
   saveSync();
   clearForm(); renderAll(); renderSettings(); idleStatus();
@@ -1738,6 +1779,18 @@ $('syncClear').onclick = () => {
   idleStatus();
   msg($('syncMsg'), '同期を解除しました。GitHub 側でもトークンを失効させてください。', 'ok');
 };
+
+// 別のタブが設定や明細を書き換えたら、この画面の表示を追随させる
+window.addEventListener('storage', e => {
+  if (e.key === SKEY) {
+    if (!$('view-settings').classList.contains('hidden')) renderSettings();
+    renderImportHint();
+  } else if (e.key === KEY) {
+    db = load();
+    clearForm(); renderAll();
+    if (!$('view-settings').classList.contains('hidden')) renderSettings();
+  }
+});
 
 // 別の端末から戻ってきたときに拾えるよう、表示された時点でも確認する。
 document.addEventListener('visibilitychange', () => {
