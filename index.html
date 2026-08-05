@@ -544,7 +544,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-03a';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-08-03b';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -794,6 +794,7 @@ function recCard(r) {
       brkSection('控除', r.deductions, x.deduction, 'var(--ded)') +
       attSection(r.attendance) +
       infoSection(r.info) +
+      cmpSection(r.compare) +
       (r.note ? '<div class="hint" style="margin-top:14px">' + esc(r.note) + '</div>' : '') +
       '<div class="rec-acts"><button class="primary" data-edit="' + r.id + '">編集</button></div>' +
       '</div>' : '') +
@@ -812,6 +813,33 @@ function brkSection(title, list, total, color) {
         '%;background:' + color + '"></i></div>' +
         '<b>' + yen(num(it.amount)) + '</b></div>';
     }).join('') + '</div>';
+}
+
+// モデル比較で食い違った箇所。どのモデルが何と読んだかを保存後も追える
+function cmpSection(c) {
+  if (!c || !Array.isArray(c.rows) || !c.rows.length) return '';
+  return '<div class="brk"><h4><span>モデル比較で差異のあった項目</span>' +
+    '<b style="font-size:11px;color:var(--text-dim)">採用: ' + esc(c.adopted || '') + '</b></h4>' +
+    '<div class="scroll-x"><table><thead><tr><th>項目</th>' +
+    (c.models || []).map(m => '<th' + (m === c.adopted ? ' style="color:var(--accent-light)"' : '') +
+      '>' + esc(m) + (m === c.adopted ? ' ✓' : '') + '</th>').join('') +
+    '</tr></thead><tbody>' +
+    c.rows.map(row => {
+      // 採用した値と食い違うセルだけを色付けする。一致しているモデルは通常表示
+      const ai = (c.models || []).indexOf(c.adopted);
+      const base = (row.vals || [])[ai];
+      return '<tr><td>' + esc(row.name) + '</td>' +
+        (row.vals || []).map((v, i) => {
+          const off = i !== ai && String(v) !== String(base);
+          return '<td style="' + (off ? 'color:#ef9a9a;font-weight:700'
+                                      : 'color:var(--text-dim)') + '">' +
+            (v === null || v === undefined ? '<span style="opacity:.4">—</span>'
+              : esc(typeof v === 'number' ? yen(v) : v)) + '</td>';
+        }).join('') + '</tr>';
+    }).join('') +
+    '</tbody></table></div>' +
+    '<div class="hint" style="margin-top:8px">' + esc(stamp(c.at)) + ' に比較。' +
+    '採用したモデル以外の値は参考です。</div></div>';
 }
 
 // 参考値は控除ではないので棒グラフを付けず、最後に淡く並べる
@@ -924,7 +952,7 @@ function renderDatalists() {
 
 function clearForm() {
   editingId = null;
-  formMeta = { source: 'manual', model: '' };
+  formMeta = { source: 'manual', model: '', compare: null };
   $('entryTitle').textContent = '明細を入力';
   $('fYm').value = ''; $('fPayDate').value = ''; $('fCompany').value = '';
   $('fKind').value = 'salary'; $('fLabel').value = '';
@@ -941,7 +969,7 @@ function clearForm() {
 }
 function fillForm(r) {
   editingId = r.id || null;
-  formMeta = { source: r.source || 'manual', model: r.model || '' };
+  formMeta = { source: r.source || 'manual', model: r.model || '', compare: r.compare || null };
   $('entryTitle').textContent = r.ym
     ? r.ym + ' の' + kindLabel(kindOf(r.kind)) + ((r.label || '').trim() ? '（' + r.label.trim() + '）' : '')
     : '明細を入力';
@@ -996,7 +1024,8 @@ $('btnSave').onclick = () => {
     },
     note: $('fNote').value.trim(),
     source: formMeta.source || 'manual',
-    model: formMeta.model || ''
+    model: formMeta.model || '',
+    compare: formMeta.compare || null
   };
   upsert(rec);
   touch();
@@ -1332,12 +1361,21 @@ function renderCompare(results) {
       '<div class="scroll-x"><table><thead><tr><th>項目</th>' +
       results.map(r => '<th>' + esc(modelShort(r.model)) + '</th>').join('') +
       '</tr></thead><tbody>' +
-      g.rows.map(row => '<tr' + (row.same ? '' : ' style="background:rgba(229,57,53,.10)"') + '>' +
-        '<td>' + esc(row.name) + (row.same ? '' : ' <span class="badge warn">差異</span>') + '</td>' +
-        row.vals.map(v => '<td' + (row.same ? '' : ' style="color:#ef9a9a;font-weight:700"') + '>' +
-          (v === null ? '<span style="opacity:.4">—</span>'
-            : esc(typeof v === 'number' ? yen(v) : v)) + '</td>').join('') +
-        '</tr>').join('') +
+      g.rows.map(row => {
+        // 多数派の値を基準に、外れているセルだけ強調する。
+        // 行全体を赤くすると、一致しているモデルまで誤りに見えてしまう。
+        const tally = {};
+        row.vals.forEach(v => { if (v !== null) tally[String(v)] = (tally[String(v)] || 0) + 1; });
+        const major = Object.keys(tally).sort((a, b) => tally[b] - tally[a])[0];
+        return '<tr' + (row.same ? '' : ' style="background:rgba(229,57,53,.08)"') + '>' +
+          '<td>' + esc(row.name) + (row.same ? '' : ' <span class="badge warn">差異</span>') + '</td>' +
+          row.vals.map(v => {
+            const off = !row.same && v !== null && String(v) !== major;
+            return '<td' + (off ? ' style="color:#ef9a9a;font-weight:700"' : '') + '>' +
+              (v === null ? '<span style="opacity:.4">—</span>'
+                : esc(typeof v === 'number' ? yen(v) : v)) + '</td>';
+          }).join('') + '</tr>';
+      }).join('') +
       '</tbody></table></div>';
   });
 
@@ -1348,21 +1386,48 @@ function renderCompare(results) {
 
   $('cmpBox').innerHTML = h;
   $('cmpBox').querySelectorAll('[data-adopt]').forEach(b => b.onclick = () => {
-    const r = results[Number(b.dataset.adopt)];
+    const idx = Number(b.dataset.adopt);
+    const r = results[idx];
     const list = r.records;
+
+    // 採用した明細に、他モデルが何と読んだかを添えて残す。
+    // 保存後に一覧から見返せるようにするため、食い違った行だけを持たせる。
+    const attach = rec => {
+      const k = recKey(rec);
+      const g = groups.find(x => x.key === k);
+      if (g && g.diff) {
+        rec.compare = {
+          at: new Date().toISOString(),
+          models: results.map(x => modelShort(x.model)),
+          adopted: modelShort(r.model),
+          rows: g.rows.filter(x => !x.same)
+                      .map(x => ({ name: x.name, vals: x.vals }))
+        };
+      }
+      return rec;
+    };
+
     images = []; renderThumbs();
     if (list.length === 1) {
       applyParsed(list[0], 'ai', r.model);
+      formMeta.compare = (attach(shapeRecord(list[0], false)) || {}).compare || null;
       pending = []; renderPending();
       goTab('entry');
     } else {
-      pending = list.map(o => { const x = normalize(o); x.source = 'ai'; x.model = r.model; return x; });
+      pending = list.map(o => {
+        const x = normalize(o); x.source = 'ai'; x.model = r.model;
+        return attach(x);
+      });
       renderPending();
       msg($('importMsg'), esc(modelShort(r.model)) + ' の結果を ' + list.length + '件として取り込みました。', 'ok');
     }
-    $('cmpBox').innerHTML = '';
-    msg($('cmpMsg'), '');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    // 比較表は消さない。採用後もどのモデルが何と読んだか確認できるようにする
+    $('cmpBox').querySelectorAll('[data-adopt]').forEach((x, i) => {
+      x.classList.toggle('primary', i === idx);
+      x.textContent = modelShort(results[i].model) + (i === idx ? ' を採用中' : ' の結果を使う');
+    });
+    msg($('cmpMsg'), esc(modelShort(r.model)) + ' の結果を取り込みました。'
+      + '比較表はこの下に残しているので、他モデルの数値と照らし合わせられます。', 'ok');
   });
 }
 
@@ -1505,7 +1570,8 @@ function shapeRecord(o, keepMeta) {
     totals: { gross: 0, deduction: 0, net: 0 },
     note: String(o.note || ''),
     source: keepMeta ? String(o.source || 'manual') : 'import',
-    model: keepMeta ? String(o.model || '') : ''
+    model: keepMeta ? String(o.model || '') : '',
+    compare: (keepMeta && o.compare && typeof o.compare === 'object') ? o.compare : null
   };
   ['earnings', 'deductions', 'info'].forEach(c => {
     r[c] = (Array.isArray(o[c]) ? o[c] : []).map(it => ({
