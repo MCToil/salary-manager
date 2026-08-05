@@ -438,6 +438,14 @@
       <div id="chart"></div>
     </div>
     <div class="card">
+      <div class="card-title">小項目の推移</div>
+      <select id="trendPick" style="margin-bottom:14px"></select>
+      <div id="trendKpi" class="kpi" style="margin-bottom:14px"></div>
+      <div id="trendChart"></div>
+      <div class="hint">下の表の項目名をタップしても、その項目の推移に切り替わります。</div>
+    </div>
+
+    <div class="card">
       <div class="card-title">支給 小項目別 年間集計</div>
       <div class="scroll-x"><div id="tblEarnings"></div></div>
     </div>
@@ -544,7 +552,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-03b';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-08-03c';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -1057,6 +1065,8 @@ function renderStats() {
   if (!recs.length) {
     $('chart').innerHTML = '<div class="empty">' + year + '年のデータがありません</div>';
     ['tblEarnings', 'tblDeductions', 'tblAttendance', 'tblInfo'].forEach(id => $(id).innerHTML = '');
+    $('trendPick').innerHTML = ''; $('trendKpi').innerHTML = '';
+    $('trendChart').innerHTML = '<div class="empty">データがありません</div>';
     return;
   }
   $('chart').innerHTML = chartSvg(recs);
@@ -1064,6 +1074,13 @@ function renderStats() {
   $('tblDeductions').innerHTML = itemTable(recs, 'deductions');
   $('tblAttendance').innerHTML = itemTable(recs, 'attendance');
   $('tblInfo').innerHTML = itemTable(recs, 'info');
+  renderTrend();
+  document.querySelectorAll('#view-stats .pick').forEach(a => a.onclick = e => {
+    e.preventDefault();
+    trendSel = a.dataset.cat + '|' + a.dataset.nm;
+    renderTrend();
+    $('trendChart').scrollIntoView({ block: 'center', behavior: 'smooth' });
+  });
 }
 
 function chartSvg(recs) {
@@ -1100,6 +1117,116 @@ function chartSvg(recs) {
   return s + '</svg>';
 }
 
+// ---------- 小項目の推移 ----------
+let trendSel = '';   // "cat|name"
+
+function trendOptions(recs) {
+  const out = [];
+  CATS.forEach(c => {
+    const names = [];
+    recs.forEach(r => (r[c] || []).forEach(it => {
+      if (it.name && !names.includes(it.name)) names.push(it.name);
+    }));
+    if (names.length) out.push({ cat: c, names: names });
+  });
+  return out;
+}
+
+function renderTrendPick(recs) {
+  const groups = trendOptions(recs);
+  const all = [];
+  groups.forEach(g => g.names.forEach(n => all.push(g.cat + '|' + n)));
+  if (!all.includes(trendSel)) trendSel = all[0] || '';
+  $('trendPick').innerHTML = groups.map(g =>
+    '<optgroup label="' + CAT_LABEL[g.cat] + '">' +
+    g.names.map(n => {
+      const v = g.cat + '|' + n;
+      return '<option value="' + esc(v) + '"' + (v === trendSel ? ' selected' : '') + '>' +
+        esc(n) + '</option>';
+    }).join('') + '</optgroup>').join('');
+  return all.length > 0;
+}
+
+// 同じ月に複数の明細（給与＋賞与）があれば合算する。
+// その月にその項目が無ければ null＝データ無しとして線をつなげない。
+function trendSeries(recs, cat, name) {
+  const out = [];
+  for (let m = 1; m <= 12; m++) {
+    const ym = year + '-' + String(m).padStart(2, '0');
+    const hits = [];
+    recs.filter(r => r.ym === ym).forEach(r =>
+      (r[cat] || []).forEach(it => { if (it.name === name) hits.push(it); }));
+    out.push(hits.length
+      ? { v: hits.reduce((a, it) => a + num(it.amount), 0), unit: hits[0].unit || '' }
+      : { v: null, unit: '' });
+  }
+  return out;
+}
+
+function trendSvg(series, color, unit) {
+  const W = 860, H = 240, PL = 58, PR = 14, PT = 18, PB = 28;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const vals = series.filter(p => p.v !== null).map(p => p.v);
+  const max = Math.max(1, ...vals), min = Math.min(0, ...vals);
+  const span = Math.max(1, max - min);
+  const x = i => PL + (iw / 11) * i;
+  const y = v => PT + ih - ih * (v - min) / span;
+  const fmt = v => unit ? (Math.round(v * 100) / 100) + unit : yen(v);
+
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;display:block">';
+  for (let i = 0; i <= 4; i++) {
+    const gy = PT + ih - ih * i / 4;
+    s += '<line x1="' + PL + '" y1="' + gy + '" x2="' + (W - PR) + '" y2="' + gy + '" stroke="#2e3248"/>' +
+      '<text x="' + (PL - 7) + '" y="' + (gy + 4) + '" fill="#7b82a8" font-size="10" text-anchor="end">' +
+      esc(fmt(min + span * i / 4)) + '</text>';
+  }
+  // 欠測を挟んだら線を切る
+  let seg = [];
+  const flush = () => {
+    if (seg.length > 1) s += '<polyline points="' + seg.join(' ') + '" fill="none" stroke="' +
+      color + '" stroke-width="2" stroke-linejoin="round"/>';
+    seg = [];
+  };
+  series.forEach((p, i) => { if (p.v === null) flush(); else seg.push(x(i) + ',' + y(p.v)); });
+  flush();
+  series.forEach((p, i) => {
+    s += '<text x="' + x(i) + '" y="' + (H - 9) + '" fill="#7b82a8" font-size="10" text-anchor="middle">' +
+      (i + 1) + '</text>';
+    if (p.v === null) return;
+    s += '<circle cx="' + x(i) + '" cy="' + y(p.v) + '" r="3.5" fill="' + color + '"/>' +
+      '<title>' + (i + 1) + '月 ' + esc(fmt(p.v)) + '</title>';
+  });
+  return s + '</svg>';
+}
+
+function renderTrend() {
+  const recs = yearRecords(year);
+  if (!renderTrendPick(recs)) {
+    $('trendKpi').innerHTML = '';
+    $('trendChart').innerHTML = '<div class="empty">項目がありません</div>';
+    return;
+  }
+  const [cat, name] = trendSel.split('|');
+  const series = trendSeries(recs, cat, name);
+  const vals = series.filter(p => p.v !== null).map(p => p.v);
+  const unit = (series.find(p => p.unit) || {}).unit || '';
+  const color = cat === 'earnings' ? '#26a69a' : cat === 'deductions' ? '#ef5350'
+              : cat === 'attendance' ? '#7986cb' : '#7b82a8';
+  const fmt = v => unit ? (Math.round(v * 100) / 100) + unit : yen(v);
+  const total = vals.reduce((a, v) => a + v, 0);
+
+  $('trendKpi').innerHTML = !vals.length ? '' :
+    '<div><div class="k">合計</div><div class="v">' + esc(fmt(total)) + '</div></div>' +
+    '<div><div class="k">平均</div><div class="v">' + esc(fmt(total / vals.length)) + '</div></div>' +
+    '<div><div class="k">最大 / 最小</div><div class="v" style="font-size:14px">' +
+      esc(fmt(Math.max(...vals))) + '<br>' + esc(fmt(Math.min(...vals))) + '</div></div>';
+  $('trendChart').innerHTML = vals.length
+    ? trendSvg(series, color, unit)
+    : '<div class="empty">この項目のデータがありません</div>';
+}
+
+$('trendPick').onchange = () => { trendSel = $('trendPick').value; renderTrend(); };
+
 function itemTable(recs, cat) {
   const names = [];
   recs.forEach(r => (r[cat] || []).forEach(it => {
@@ -1117,7 +1244,9 @@ function itemTable(recs, cat) {
       if (it && it.unit) unit = it.unit;
       return '<td>' + (it ? (cat === 'attendance' ? v + esc(it.unit || '') : yen(v)) : '–') + '</td>';
     }).join('');
-    h += '<tr><td>' + esc(nm) + '</td>' + cells + '<td><b>' +
+    h += '<tr><td><a href="#" class="pick" data-cat="' + cat + '" data-nm="' + esc(nm) +
+      '" style="color:inherit;text-decoration:none;border-bottom:1px dotted var(--text-dim)">' +
+      esc(nm) + '</a></td>' + cells + '<td><b>' +
       (cat === 'attendance' ? Math.round(tot * 100) / 100 + esc(unit) : yen(tot)) + '</b></td></tr>';
   });
   return h + '</tbody></table>';
