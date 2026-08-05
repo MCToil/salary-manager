@@ -351,6 +351,12 @@
       </div>
       <div id="rowsAttendance"></div>
 
+      <div class="sec-head">
+        <h3>参考<span class="amt">課税対象額など。控除合計には含めません</span></h3>
+        <button class="mini" data-add="info">＋ 小項目</button>
+      </div>
+      <div id="rowsInfo"></div>
+
       <div class="sec-head"><h3>合計（明細記載値・空欄なら自動計算）</h3></div>
       <div class="grid g3">
         <div><label>総支給</label><input type="number" id="fGross" placeholder="自動"></div>
@@ -373,6 +379,7 @@
     <datalist id="dlEarnings"></datalist>
     <datalist id="dlDeductions"></datalist>
     <datalist id="dlAttendance"></datalist>
+    <datalist id="dlInfo"></datalist>
   </div>
 
   <!-- ===== 画像取込 ===== -->
@@ -393,6 +400,20 @@
       <div id="importMsg"></div>
       <div id="pendingBox"></div>
       <div class="hint" id="importHint"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">モデル比較</div>
+      <div class="hint" style="margin:0 0 10px">
+        同じ画像を複数のモデルで読み取り、結果が一致するか突き合わせます。
+        金額が食い違った箇所だけを抜き出して表示するので、どのモデルを常用するか判断できます。
+      </div>
+      <div id="cmpPick" class="att-chips" style="margin-bottom:12px"></div>
+      <div class="actions" style="margin-top:0">
+        <button class="primary" id="btnCompare" disabled>選択したモデルで比較</button>
+      </div>
+      <div id="cmpMsg"></div>
+      <div id="cmpBox"></div>
     </div>
 
     <div class="card">
@@ -427,6 +448,10 @@
     <div class="card">
       <div class="card-title">勤怠 小項目別 年間集計</div>
       <div class="scroll-x"><div id="tblAttendance"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">参考 小項目別 年間集計</div>
+      <div class="scroll-x"><div id="tblInfo"></div></div>
     </div>
   </div>
 
@@ -519,7 +544,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-02g';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-08-03a';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか
 const MODELS = [
@@ -532,8 +557,11 @@ const MODELS = [
         + '小さな文字や桁の読み違いが起きやすい。保存前に必ず数字を確認してください。' }
 ];
 const DEFAULT_MODEL = 'claude-opus-5';
-const CATS = ['earnings', 'deductions', 'attendance'];
-const CAT_LABEL = { earnings: '支給', deductions: '控除', attendance: '勤怠' };
+const CATS = ['earnings', 'deductions', 'attendance', 'info'];
+const CAT_LABEL = { earnings: '支給', deductions: '控除', attendance: '勤怠', info: '参考' };
+// 課税対象額のように、控除欄に印字されていても控除ではない金額。
+// 控除合計に混ぜると手取りが合わなくなるので参考欄へ振り分ける。
+const INFO_PAT = /課税対象|課税支給|課税計|非課税(額|計|支給)|社会保険料合計|所得税課税/;
 // 同じ月に給与と賞与が並ぶので、月だけでは一意にならない
 const KINDS = [
   { v: 'salary', t: '給与' },
@@ -586,7 +614,7 @@ function blank() {
     version: 1,
     updatedAt: '',
     records: [],
-    master: { earnings: [], deductions: [], attendance: [] }
+    master: { earnings: [], deductions: [], attendance: [], info: [] }
   };
 }
 function modelId() {
@@ -765,6 +793,7 @@ function recCard(r) {
       brkSection('支給', r.earnings, x.gross, 'var(--pay)') +
       brkSection('控除', r.deductions, x.deduction, 'var(--ded)') +
       attSection(r.attendance) +
+      infoSection(r.info) +
       (r.note ? '<div class="hint" style="margin-top:14px">' + esc(r.note) + '</div>' : '') +
       '<div class="rec-acts"><button class="primary" data-edit="' + r.id + '">編集</button></div>' +
       '</div>' : '') +
@@ -783,6 +812,16 @@ function brkSection(title, list, total, color) {
         '%;background:' + color + '"></i></div>' +
         '<b>' + yen(num(it.amount)) + '</b></div>';
     }).join('') + '</div>';
+}
+
+// 参考値は控除ではないので棒グラフを付けず、最後に淡く並べる
+function infoSection(list) {
+  const rows = (list || []).filter(it => it.name);
+  if (!rows.length) return '';
+  return '<div class="brk"><h4><span>参考</span></h4>' +
+    rows.map(it => '<div class="brk-row" style="grid-template-columns:1fr auto">' +
+      '<span>' + esc(it.name) + '</span><b style="color:var(--text-dim)">' +
+      yen(num(it.amount)) + '</b></div>').join('') + '</div>';
 }
 
 function attSection(list) {
@@ -804,7 +843,7 @@ function rowHtml(cat, it) {
       '<input type="text" class="r-unit" placeholder="単位" value="' + esc(it && it.unit) + '">' +
       '<button class="row-del" type="button">×</button></div>';
   }
-  const dl = cat === 'earnings' ? 'dlEarnings' : 'dlDeductions';
+  const dl = cat === 'earnings' ? 'dlEarnings' : cat === 'info' ? 'dlInfo' : 'dlDeductions';
   return '<div class="row">' +
     '<input type="text" class="r-name" list="' + dl + '" placeholder="項目名" value="' + nm + '">' +
     '<input type="number" step="any" class="r-amount" placeholder="0" value="' + (it && it.amount !== '' && it.amount != null ? num(it.amount) : '') + '">' +
@@ -876,7 +915,8 @@ $('fYm').addEventListener('change', checkDup);
 $('fKind').addEventListener('change', checkDup);
 
 function renderDatalists() {
-  const map = { earnings: 'dlEarnings', deductions: 'dlDeductions', attendance: 'dlAttendance' };
+  const map = { earnings: 'dlEarnings', deductions: 'dlDeductions',
+                attendance: 'dlAttendance', info: 'dlInfo' };
   CATS.forEach(c => {
     $(map[c]).innerHTML = db.master[c].map(n => '<option value="' + esc(n) + '">').join('');
   });
@@ -893,6 +933,7 @@ function clearForm() {
   CATS.forEach(c => { containerOf(c).innerHTML = ''; });
   ['earnings', 'deductions'].forEach(c => { addRow(c, null); addRow(c, null); });
   addRow('attendance', null);
+  addRow('info', null);
   $('btnDelete').classList.add('hidden');
   msg($('totalCheck'), '');
   msg($('dupCheck'), '');
@@ -947,6 +988,7 @@ $('btnSave').onclick = () => {
     earnings: readRows('earnings'),
     deductions: readRows('deductions'),
     attendance: readRows('attendance'),
+    info: readRows('info'),
     totals: {
       gross: $('fGross').value === '' ? 0 : num($('fGross').value),
       deduction: $('fDeduction').value === '' ? 0 : num($('fDeduction').value),
@@ -985,13 +1027,14 @@ function renderStats() {
   const recs = yearRecords(year);
   if (!recs.length) {
     $('chart').innerHTML = '<div class="empty">' + year + '年のデータがありません</div>';
-    ['tblEarnings', 'tblDeductions', 'tblAttendance'].forEach(id => $(id).innerHTML = '');
+    ['tblEarnings', 'tblDeductions', 'tblAttendance', 'tblInfo'].forEach(id => $(id).innerHTML = '');
     return;
   }
   $('chart').innerHTML = chartSvg(recs);
   $('tblEarnings').innerHTML = itemTable(recs, 'earnings');
   $('tblDeductions').innerHTML = itemTable(recs, 'deductions');
   $('tblAttendance').innerHTML = itemTable(recs, 'attendance');
+  $('tblInfo').innerHTML = itemTable(recs, 'info');
 }
 
 function chartSvg(recs) {
@@ -1082,6 +1125,7 @@ function renderThumbs() {
   });
   $('btnAnalyze').disabled = images.length === 0;
   $('btnClearImg').disabled = images.length === 0;
+  if ($('btnCompare')) $('btnCompare').disabled = cmpSel.size < 2 || images.length === 0;
 }
 $('btnClearImg').onclick = () => { images = []; renderThumbs(); msg($('importMsg'), ''); };
 
@@ -1158,6 +1202,12 @@ const RECORD_SCHEMA = {
       type: 'array', description: '控除欄の小項目。金額は正の数',
       items: { type: 'object', properties: { name: { type: 'string' }, amount: { type: 'number' } }, required: ['name', 'amount'], additionalProperties: false }
     },
+    info: {
+      type: 'array',
+      description: '課税対象額・課税支給額・社会保険料合計など、控除欄に印字されていても'
+        + '実際には控除ではない参考値。該当が無ければ空配列',
+      items: { type: 'object', properties: { name: { type: 'string' }, amount: { type: 'number' } }, required: ['name', 'amount'], additionalProperties: false }
+    },
     attendance: {
       type: 'array', description: '勤怠欄の小項目',
       items: { type: 'object', properties: { name: { type: 'string' }, amount: { type: 'number' }, unit: { type: 'string' } }, required: ['name', 'amount', 'unit'], additionalProperties: false }
@@ -1170,12 +1220,152 @@ const RECORD_SCHEMA = {
     note: { type: 'string', description: '読み取れなかった箇所や補足。無ければ空文字' }
   },
   required: ['ym', 'kind', 'label', 'payDate', 'company',
-             'earnings', 'deductions', 'attendance', 'totals', 'note'],
+             'earnings', 'deductions', 'info', 'attendance', 'totals', 'note'],
   additionalProperties: false
 };
 
 // 渡した画像に明細が何通含まれるかは事前に分からないので、常に配列で受け取る。
 // 同じ明細の複数ページなら1件、別々の明細なら件数ぶん返させる。
+// ---------- モデル比較 ----------
+const cmpSel = new Set(['claude-opus-5', 'claude-sonnet-5']);
+
+function renderCmpPick() {
+  $('cmpPick').innerHTML = MODELS.map(m =>
+    '<span style="cursor:pointer;' +
+    (cmpSel.has(m.id) ? 'background:rgba(92,107,192,.28);color:var(--accent-light)' : '') +
+    '" data-m="' + m.id + '">' + (cmpSel.has(m.id) ? '☑ ' : '☐ ') + esc(m.short) + '</span>').join('');
+  $('cmpPick').querySelectorAll('[data-m]').forEach(el => el.onclick = () => {
+    if (cmpSel.has(el.dataset.m)) cmpSel.delete(el.dataset.m); else cmpSel.add(el.dataset.m);
+    renderCmpPick();
+  });
+  $('btnCompare').disabled = cmpSel.size < 2 || images.length === 0;
+}
+
+// 明細1件を「項目名 → 値」の平たい対応表にする。比較しやすくするため
+function flatten(r) {
+  const f = {};
+  f['対象年月'] = r.ym || '';
+  f['種別'] = kindLabel(kindOf(r.kind)) + ((r.label || '').trim() ? '（' + r.label.trim() + '）' : '');
+  f['支給日'] = r.payDate || '';
+  f['支給元'] = r.company || '';
+  ['earnings', 'deductions', 'info'].forEach(c => {
+    (r[c] || []).forEach(it => { if (it.name) f[CAT_LABEL[c] + ':' + it.name] = num(it.amount); });
+  });
+  (r.attendance || []).forEach(it => {
+    if (it.name) f['勤怠:' + it.name] = num(it.amount) + (it.unit || '');
+  });
+  const t = r.totals || {};
+  f['総支給'] = num(t.gross); f['控除合計'] = num(t.deduction); f['手取り'] = num(t.net);
+  return f;
+}
+
+// モデルごとの結果を突き合わせる。records は年月+種別で対応付ける
+function diffResults(results) {
+  const keys = [];
+  results.forEach(r => (r.records || []).forEach(x => {
+    const k = recKey(shapeRecord(x, false));
+    if (!keys.includes(k)) keys.push(k);
+  }));
+  return keys.map(k => {
+    const per = results.map(r => {
+      const rec = (r.records || []).find(x => recKey(shapeRecord(x, false)) === k);
+      return rec ? flatten(shapeRecord(rec, false)) : null;
+    });
+    const fields = [];
+    per.forEach(f => { if (f) Object.keys(f).forEach(n => { if (!fields.includes(n)) fields.push(n); }); });
+    const rows = fields.map(n => {
+      const vals = per.map(f => (f && n in f) ? f[n] : null);
+      const shown = vals.filter(v => v !== null);
+      const same = shown.length === vals.length &&
+                   shown.every(v => String(v) === String(shown[0]));
+      return { name: n, vals: vals, same: same };
+    });
+    return { key: k, rows: rows, diff: rows.filter(r => !r.same).length };
+  });
+}
+
+$('btnCompare').onclick = async () => {
+  const key = settings().apiKey.trim();
+  if (!key) { msg($('cmpMsg'), 'API キーが未設定です。設定タブで登録してください。', 'err'); return; }
+  if (!images.length || cmpSel.size < 2) return;
+
+  const models = MODELS.filter(m => cmpSel.has(m.id)).map(m => m.id);
+  $('btnCompare').disabled = true;
+  $('cmpBox').innerHTML = '';
+  msg($('cmpMsg'), '<span class="spin"></span>' + models.map(m => esc(modelShort(m))).join('・') +
+    ' で読み取り中…（' + models.length + '回ぶんの料金がかかります）', 'info');
+
+  // 同時に投げる。1つ失敗しても他の結果は見たいので個別に受け止める
+  const settled = await Promise.all(models.map(m =>
+    callModel(m, key).then(r => ({ ok: true, id: m, r: r }),
+                           e => ({ ok: false, id: m, e: e }))));
+  $('btnCompare').disabled = false;
+
+  const good = settled.filter(x => x.ok).map(x => x.r);
+  const bad = settled.filter(x => !x.ok);
+  if (good.length < 2) {
+    msg($('cmpMsg'), '比較には2つ以上の成功した結果が必要です。<br>' +
+      settled.map(x => esc(modelShort(x.id)) + '：' + (x.ok ? 'OK' : esc(x.e.message))).join('<br>'), 'err');
+    return;
+  }
+  const cost = good.reduce((a, r) => a + Number(estCost(r.model, r.usage).slice(1)), 0);
+  msg($('cmpMsg'), '読み取り完了（合計 約$' + cost.toFixed(4) + '）' +
+    (bad.length ? '<br>失敗: ' + bad.map(x => esc(modelShort(x.id)) + '（' + esc(x.e.message) + '）').join('、') : ''),
+    bad.length ? 'err' : 'ok');
+  renderCompare(good);
+};
+
+function renderCompare(results) {
+  const groups = diffResults(results);
+  const totalDiff = groups.reduce((a, g) => a + g.diff, 0);
+  const totalRows = groups.reduce((a, g) => a + g.rows.length, 0);
+
+  let h = '<div class="msg ' + (totalDiff ? 'err' : 'ok') + '" style="margin-top:14px">' +
+    (totalDiff
+      ? '<b>' + totalRows + '項目中 ' + totalDiff + '項目が不一致です。</b>下の表で赤い行を確認してください。'
+      : '<b>すべて一致しました（' + totalRows + '項目）。</b>どのモデルでも同じ結果です。') + '</div>';
+
+  groups.forEach(g => {
+    h += '<div class="card-title" style="margin:18px 0 8px">' + esc(g.key.split('|').slice(0, 2).join(' / ')) +
+      '　<span style="color:' + (g.diff ? 'var(--danger)' : 'var(--ok)') + '">' +
+      (g.diff ? g.diff + '項目が不一致' : '一致') + '</span></div>' +
+      '<div class="scroll-x"><table><thead><tr><th>項目</th>' +
+      results.map(r => '<th>' + esc(modelShort(r.model)) + '</th>').join('') +
+      '</tr></thead><tbody>' +
+      g.rows.map(row => '<tr' + (row.same ? '' : ' style="background:rgba(229,57,53,.10)"') + '>' +
+        '<td>' + esc(row.name) + (row.same ? '' : ' <span class="badge warn">差異</span>') + '</td>' +
+        row.vals.map(v => '<td' + (row.same ? '' : ' style="color:#ef9a9a;font-weight:700"') + '>' +
+          (v === null ? '<span style="opacity:.4">—</span>'
+            : esc(typeof v === 'number' ? yen(v) : v)) + '</td>').join('') +
+        '</tr>').join('') +
+      '</tbody></table></div>';
+  });
+
+  h += '<div class="card-title" style="margin:20px 0 8px">結果を採用する</div>' +
+    '<div class="actions" style="margin-top:0">' +
+    results.map((r, i) => '<button data-adopt="' + i + '">' + esc(modelShort(r.model)) +
+      ' の結果を使う</button>').join('') + '</div>';
+
+  $('cmpBox').innerHTML = h;
+  $('cmpBox').querySelectorAll('[data-adopt]').forEach(b => b.onclick = () => {
+    const r = results[Number(b.dataset.adopt)];
+    const list = r.records;
+    images = []; renderThumbs();
+    if (list.length === 1) {
+      applyParsed(list[0], 'ai', r.model);
+      pending = []; renderPending();
+      goTab('entry');
+    } else {
+      pending = list.map(o => { const x = normalize(o); x.source = 'ai'; x.model = r.model; return x; });
+      renderPending();
+      msg($('importMsg'), esc(modelShort(r.model)) + ' の結果を ' + list.length + '件として取り込みました。', 'ok');
+    }
+    $('cmpBox').innerHTML = '';
+    msg($('cmpMsg'), '');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+}
+
 const SCHEMA = {
   type: 'object',
   properties: {
@@ -1201,6 +1391,8 @@ const PROMPT = [
   '- 支給・控除・勤怠の各欄にある小項目を、明細に書かれている名称のまま漏れなく列挙する',
   '- 金額はカンマや円記号を除いた数値のみ。控除額は正の数で表す',
   '- 勤怠は数値と単位（日・時間 など）を分けて入れる',
+  '- 「課税対象額」「課税支給額」「社会保険料合計」など、控除欄に並んでいても実際に差し引かれていない'
+    + '参考値は deductions ではなく info に入れる。deductions の合計＝実際の控除合計になるようにする',
   '- 合計欄（総支給額・控除合計・差引支給額）は totals に入れる。記載が無い項目は 0',
   '- 対象年月は「令和○年○月分」等の記載を西暦 YYYY-MM に変換する。支給日と対象年月が異なる場合、ym は対象月、payDate は支給日',
   '- kind の判定は慎重に行う。次のいずれかに当てはまれば bonus とする:',
@@ -1213,6 +1405,48 @@ const PROMPT = [
   '- 判読できない文字があれば note に書き、値は 0 にする。推測で数字を埋めない'
 ].join('\n');
 
+// 1モデルぶんの読み取り。比較機能からも同じ経路を使う
+async function callModel(modelIdStr, key) {
+  const content = images.map(im => ({
+    type: 'image',
+    source: { type: 'base64', media_type: im.mediaType, data: im.b64 }
+  }));
+  content.push({ type: 'text', text: PROMPT });
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: modelIdStr,
+      max_tokens: 16000,
+      // effort 非対応のモデル（Haiku 4.5）に送ると 400 になるので付けない
+      output_config: modelMeta(modelIdStr).effort
+        ? { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } }
+        : { format: { type: 'json_schema', schema: SCHEMA } },
+      messages: [{ role: 'user', content: content }]
+    })
+  });
+
+  if (!res.ok) {
+    let detail = '';
+    try { const j = await res.json(); detail = (j.error && j.error.message) || ''; } catch (e) {}
+    throw new Error('API エラー ' + res.status + (detail ? '：' + detail : ''));
+  }
+  const data = await res.json();
+  if (data.stop_reason === 'refusal') throw new Error('リクエストが拒否されました。');
+  const block = (data.content || []).find(b => b.type === 'text');
+  if (!block) throw new Error('応答にテキストが含まれていません。');
+  const parsed = JSON.parse(block.text);
+  const list = Array.isArray(parsed.records) ? parsed.records.filter(o => o && o.ym) : [];
+  if (!list.length) throw new Error('明細を読み取れませんでした。画像が鮮明か確認してください。');
+  return { model: data.model || modelIdStr, records: list, usage: data.usage || {} };
+}
+
 $('btnAnalyze').onclick = async () => {
   const key = settings().apiKey.trim();
   if (!key) { msg($('importMsg'), 'API キーが未設定です。設定タブで登録するか、下の JSON 取込を使ってください。', 'err'); return; }
@@ -1223,47 +1457,8 @@ $('btnAnalyze').onclick = async () => {
   msg($('importMsg'), '<span class="spin"></span>' + esc(modelShort(useModel)) + ' が明細を読み取っています…', 'info');
 
   try {
-    const content = images.map(im => ({
-      type: 'image',
-      source: { type: 'base64', media_type: im.mediaType, data: im.b64 }
-    }));
-    content.push({ type: 'text', text: PROMPT });
-
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: useModel,
-        max_tokens: 16000,
-        // effort 非対応のモデル（Haiku 4.5）に送ると 400 になるので付けない
-        output_config: modelMeta(useModel).effort
-          ? { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } }
-          : { format: { type: 'json_schema', schema: SCHEMA } },
-        messages: [{ role: 'user', content: content }]
-      })
-    });
-
-    if (!res.ok) {
-      let detail = '';
-      try { const j = await res.json(); detail = (j.error && j.error.message) || ''; } catch (e) {}
-      throw new Error('API エラー ' + res.status + (detail ? '：' + detail : ''));
-    }
-    const data = await res.json();
-    if (data.stop_reason === 'refusal') throw new Error('リクエストが拒否されました。');
-    const block = (data.content || []).find(b => b.type === 'text');
-    if (!block) throw new Error('応答にテキストが含まれていません。');
-    const parsed = JSON.parse(block.text);
-
-    const used = data.model || useModel;
-    const list = Array.isArray(parsed.records) ? parsed.records.filter(o => o && o.ym) : [];
-    if (!list.length) throw new Error('明細を読み取れませんでした。画像が鮮明か確認してください。');
-
-    const u = data.usage || {};
+    const r = await callModel(useModel, key);
+    const used = r.model, list = r.records, u = r.usage;
     const cost = u.input_tokens
       ? '<br><span style="opacity:.7">tokens: in ' + u.input_tokens + ' / out ' +
         (u.output_tokens || 0) + '（約' + estCost(used, u) + '）</span>' : '';
@@ -1306,18 +1501,25 @@ function shapeRecord(o, keepMeta) {
     label: String(o.label || '').trim(),
     payDate: String(o.payDate || ''),
     company: String(o.company || ''),
-    earnings: [], deductions: [], attendance: [],
+    earnings: [], deductions: [], attendance: [], info: [],
     totals: { gross: 0, deduction: 0, net: 0 },
     note: String(o.note || ''),
     source: keepMeta ? String(o.source || 'manual') : 'import',
     model: keepMeta ? String(o.model || '') : ''
   };
-  ['earnings', 'deductions'].forEach(c => {
+  ['earnings', 'deductions', 'info'].forEach(c => {
     r[c] = (Array.isArray(o[c]) ? o[c] : []).map(it => ({
       name: String(it.name || '').trim(),
       amount: Math.abs(num(it.amount))
     })).filter(it => it.name);
   });
+  // 課税対象額などが控除に紛れていたら参考欄へ移す。
+  // 控除合計に足されると手取りが合わなくなるため。
+  const misfiled = r.deductions.filter(it => INFO_PAT.test(it.name));
+  if (misfiled.length) {
+    r.deductions = r.deductions.filter(it => !INFO_PAT.test(it.name));
+    misfiled.forEach(it => { if (!r.info.some(x => x.name === it.name)) r.info.push(it); });
+  }
   r.attendance = (Array.isArray(o.attendance) ? o.attendance : []).map(it => ({
     name: String(it.name || '').trim(),
     amount: num(it.amount !== undefined ? it.amount : it.value),
@@ -1451,7 +1653,7 @@ $('btnExportCsv').onclick = () => {
   const recs = db.records.slice().sort((a, b) => (a.ym || '').localeCompare(b.ym || '')
     || (KIND_ORDER[kindOf(a.kind)] - KIND_ORDER[kindOf(b.kind)]));
   if (!recs.length) { msg($('dataMsg'), 'データがありません。', 'err'); return; }
-  const names = { earnings: [], deductions: [], attendance: [] };
+  const names = { earnings: [], deductions: [], attendance: [], info: [] };
   recs.forEach(r => CATS.forEach(c => (r[c] || []).forEach(it => {
     if (it.name && !names[c].includes(it.name)) names[c].push(it.name);
   })));
@@ -1459,6 +1661,7 @@ $('btnExportCsv').onclick = () => {
     .concat(names.earnings.map(n => '支給:' + n))
     .concat(names.deductions.map(n => '控除:' + n))
     .concat(names.attendance.map(n => '勤怠:' + n))
+    .concat(names.info.map(n => '参考:' + n))
     .concat(['総支給', '控除合計', '手取り', 'メモ']);
   const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
   const lines = [head.map(q).join(',')];
@@ -1469,6 +1672,7 @@ $('btnExportCsv').onclick = () => {
       .concat(names.earnings.map(n => cell('earnings', n)))
       .concat(names.deductions.map(n => cell('deductions', n)))
       .concat(names.attendance.map(n => cell('attendance', n)))
+      .concat(names.info.map(n => cell('info', n)))
       .concat([t.gross, t.deduction, t.net, r.note]).map(q).join(','));
   });
   download('salary_' + new Date().toISOString().slice(0, 10) + '.csv',
@@ -1585,7 +1789,8 @@ function parseRemote(text) {
   return {
     updatedAt: typeof d.updatedAt === 'string' ? d.updatedAt : '',
     records: d.records.filter(r => r && typeof r.ym === 'string').map(r => shapeRecord(r, true)),
-    master: { earnings: names(m.earnings), deductions: names(m.deductions), attendance: names(m.attendance) }
+    master: { earnings: names(m.earnings), deductions: names(m.deductions),
+              attendance: names(m.attendance), info: names(m.info) }
   };
 }
 
@@ -1816,6 +2021,7 @@ function renderAll() {
 }
 $('fKind').innerHTML = KINDS.map(k => '<option value="' + k.v + '">' + k.t + '</option>').join('');
 $('buildTag').textContent = BUILD;
+renderCmpPick();
 clearForm();
 renderDatalists();
 renderImportHint();
