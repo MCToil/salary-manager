@@ -2034,12 +2034,24 @@ function parseRemote(text) {
   };
 }
 
+// Gist の中に自分のファイルが無いときの案内。別のアプリの Gist ID を貼って
+// しまう取り違えが起きやすいので、何が入っているかを見せて、アプリごとに
+// 別の Gist が要ることを書く。
+function noFileError(g) {
+  const others = Object.keys((g && g.files) || {});
+  return new Error(
+    `この Gist に給与管理のファイル（${GIST_FILE}）がありません。`
+    + (others.length ? `入っているのは ${others.join('、')} です。` : '')
+    + 'アプリごとに別の Gist が必要です（トークンは共通で構いません）。'
+    + '1台目では Gist ID を空欄のまま保存すると、給与管理用の Gist が作られます。');
+}
+
 function fetchRemote() {
   return fetch(GH + '/gists/' + encodeURIComponent(sync.gistId), { headers: ghHeaders() })
     .then(res => { if (!res.ok) throw ghError(res); return res.json(); })
     .then(g => {
       const f = g.files && g.files[GIST_FILE];
-      if (!f) throw new Error('Gist に給与データのファイルがありません。');
+      if (!f) throw noFileError(g);
       // 巨大な Gist は内容が省略される。その場合だけ本体を取りに行く。
       if (f.truncated && f.raw_url) return fetch(f.raw_url).then(r => r.text()).then(parseRemote);
       return parseRemote(f.content);
