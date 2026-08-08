@@ -591,6 +591,15 @@ function recTitle(r) {
 }
 
 // ---------- state ----------
+// 台帳とは別の、ごく小さなキー。この端末でこのアプリを使った印。
+// 台帳だけが読み出せないことが実際に起きるので、それを「初めての利用」と
+// 取り違えないための目印にする。
+const SEEN_KEY = 'salary-manager-seen';
+
+let LOAD_FAILED = false;   // 読み出しに失敗した
+let LOST = false;          // 使った印はあるのに台帳が無い
+let HOLD = false;          // 上書きを止めている
+
 let db = load();
 let year = new Date().getFullYear();
 let editingId = null;
@@ -651,7 +660,11 @@ function estCost(id, u) {
 function load() {
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return blank();
+    if (!raw) {
+      // 使った印があるのに台帳が無い。消えたか、この起動で読めなかったか。
+      if (localStorage.getItem(SEEN_KEY)) { LOST = true; HOLD = true; }
+      return blank();
+    }
     const d = JSON.parse(raw);
     const b = blank();
     // 旧版は設定を同じ塊に入れていた。初回だけ専用キーへ移す
@@ -666,10 +679,25 @@ function load() {
     d.records = Array.isArray(d.records) ? d.records : [];
     d.updatedAt = typeof d.updatedAt === 'string' ? d.updatedAt : '';
     return d;
-  } catch (e) { return blank(); }
+  } catch (e) {
+    // 壊れた内容を白紙にすり替えると、それをクラウドへ送って全部消しかねない
+    LOAD_FAILED = true;
+    return blank();
+  }
 }
+
+// この端末の台帳が「作られたもの」か。updatedAt は touch() でしか進まないので、
+// 空のままの白紙は「一度も使っていない」か「読み出せなかった」のどちらか。
+// どちらにせよクラウドへ送ってよい中身ではない。
+function authored() { return !LOAD_FAILED && !HOLD && !!db.updatedAt; }
+
 // save(): 端末内の保存だけ（設定変更など、同期対象外の更新に使う）
-function save() { localStorage.setItem(KEY, JSON.stringify(db)); }
+// HOLD 中は書かない。読めなかっただけの台帳を白紙で塗り潰さないため。
+function save() {
+  if (HOLD) return;
+  localStorage.setItem(KEY, JSON.stringify(db));
+  if (db.records.length) localStorage.setItem(SEEN_KEY, db.updatedAt || new Date().toISOString());
+}
 // touch(): 明細・マスタを変えたとき。updatedAt を進めて同期を予約する
 function touch() {
   // 別のタブが先に更新していたら、こちらの古い内容で潰さない
@@ -677,6 +705,12 @@ function touch() {
     alert('別のタブ（または更新前の画面）でデータが変更されています。\n\n'
         + 'このまま保存すると、そちらの変更が失われます。\n'
         + 'この画面を再読み込みしてから操作し直してください。');
+    return;
+  }
+  if (HOLD) {
+    alert('保存されている明細が見つからない状態です。\n\n'
+        + '読み出せなかっただけの可能性があるので、書き込みを止めています。\n'
+        + 'まずこの画面を再読み込みしてください。');
     return;
   }
   db.updatedAt = new Date().toISOString();
@@ -2002,6 +2036,12 @@ function fetchRemote() {
 }
 
 function pushRemote() {
+  // 最後の砦。白紙は何があっても送らない。
+  if (!authored()) {
+    return Promise.reject(new Error(LOAD_FAILED
+      ? 'この端末の台帳を読み出せませんでした。クラウドを壊さないよう、保存を中止しました。'
+      : 'この端末の台帳が白紙なので、クラウドへの保存を中止しました。'));
+  }
   const creating = !sync.gistId;
   const body = { description: '給与管理のデータ', files: {} };
   body.files[GIST_FILE] = { content: payload() };
@@ -2021,6 +2061,8 @@ function pushRemote() {
 }
 
 function applyRemote(remote) {
+  // クラウドから中身が戻ってきたので、書き込みの止めは解除してよい
+  LOST = false; HOLD = false; LOAD_FAILED = false;
   // 取り込むと手元の内容は消える。直前の状態を1世代だけ退避しておく。
   if (db.records.length) {
     try {
@@ -2054,9 +2096,24 @@ function runSync(manual) {
 
   (sync.gistId ? fetchRemote() : Promise.resolve(null)).then(remote => {
     if (!remote) return pushRemote();
+
+    // 手元が白紙のとき（初めての端末、localStorage が消えた、読み出しに
+    // 失敗した）は、送る側に回さず黙って取り込む。ここを push に流すと
+    // クラウドの中身が消え、他の端末からも消える。
+    if (!authored()) {
+      if (remote.records.length) return applyRemote(remote);
+      return '最新です';
+    }
+
     const localChanged = db.updatedAt !== sync.lastSyncedAt;
     const remoteChanged = remote.updatedAt !== sync.lastSyncedAt;
     if (!localChanged && !remoteChanged) return '最新です';
+
+    // 取り込むと手元の明細が減る／手元を空にして送る場合は必ず確認する
+    const shrink = remote.records.length < db.records.length;
+    const emptyPush = !db.records.length && remote.records.length > 0;
+    if (shrink || emptyPush) return askConflict(remote);
+
     if (!localChanged) return applyRemote(remote);
     if (!remoteChanged) return pushRemote();
     return askConflict(remote);
