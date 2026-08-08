@@ -61,6 +61,15 @@
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
   }
+
+  .lostbar {
+    border: 1px solid var(--danger); border-left-width: 3px;
+    border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px;
+    font-size: 13px; line-height: 1.8;
+  }
+  .lostbar[hidden] { display: none; }
+  .lostbar b { font-weight: 700; }
+  .lostbar .acts2 { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   .card-title {
     font-size: 11px; font-weight: 600; text-transform: uppercase;
     letter-spacing: 1px; color: var(--text-dim); margin-bottom: 14px;
@@ -271,6 +280,8 @@
       <button class="nav-btn" id="yNext">›</button>
     </div>
   </div>
+
+  <div class="lostbar" id="lostBar" hidden></div>
 
   <div class="tabs">
     <button class="tab active" data-view="list">一覧</button>
@@ -2267,7 +2278,43 @@ function download(name, text, mime) {
 }
 
 // ---------- init ----------
+/* ---- 明細が見つからないとき ----
+   台帳のキーだけが読み出せないことが実際に起きる。それを「初めての利用」と
+   扱って白紙を保存すると、読めなかっただけの明細が本当に消える。印がある
+   あいだは書き込みを止めて、本人に選んでもらう。 */
+
+function renderLostBar() {
+  const bar = $('lostBar');
+  if (!LOST && !LOAD_FAILED) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = (LOAD_FAILED
+      ? '<b>保存されている明細を読み出せませんでした。</b>内容が壊れている可能性があります。'
+      : '<b>以前この端末で使った明細が見つかりません。</b>'
+        + 'ブラウザの保存領域から読み出せなかっただけの可能性があります。')
+    + '<br>いまは<b>書き込みを止めています</b>。まず「再読み込み」を試してください。'
+    + 'それで出てこない場合だけ、クラウドから復元するか、新しく始めてください。'
+    + '<div class="acts2">'
+    + '<button class="primary" id="lostReload">再読み込み</button>'
+    + '<button id="lostPull">クラウドから復元</button>'
+    + '<button class="danger" id="lostNew">新しく始める</button>'
+    + '</div>';
+
+  $('lostReload').onclick = () => location.reload();
+  $('lostPull').onclick = () => {
+    if (!sync.token || !sync.gistId) { goTab('settings'); msg($('syncMsg'), '先にトークンと Gist ID を入れてください。', 'err'); return; }
+    runSync(true);   // 白紙なので取り込む方向にしか動かない
+  };
+  $('lostNew').onclick = () => {
+    if (!confirm('この端末の明細を空のまま始めます。読み出せていないだけの明細があった場合、それは失われます。よろしいですか？')) return;
+    try { localStorage.removeItem(SEEN_KEY); } catch (e) { /* 消せなくても続行 */ }
+    // 読み出し失敗の印も一緒に落とす。残すと案内が消えず、同期の送信も止まったままになる
+    LOST = false; HOLD = false; LOAD_FAILED = false;
+    renderLostBar();
+  };
+}
+
 function renderAll() {
+  renderLostBar();
   renderList();
   if (!$('view-stats').classList.contains('hidden')) renderStats();
 }
