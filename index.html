@@ -1993,8 +1993,19 @@ function setStatus(text, cls) {
   $('syncStatus').textContent = text;
   $('syncDot').className = 'dot' + (cls ? ' ' + cls : '');
 }
+// 自動同期は保存のたびに走る。そこで確認ダイアログを出しては、追加するたびに
+// 邪魔になる。判断が要ることは覚えておいて画面に出すだけにし、本人が
+// 「今すぐ同期」を押したときに聞く。
+let NEEDS_CHOICE = false;
+function needsChoice(remote, manual) {
+  if (manual) return askConflict(remote);
+  NEEDS_CHOICE = true;
+  return null;
+}
+
 function idleStatus() {
   if (!sync.token) setStatus('同期は未設定です。', '');
+  else if (NEEDS_CHOICE) setStatus('内容が食い違っています。「今すぐ同期」を押すと、どちらを残すか選べます。', 'pend');
   else if (db.updatedAt && db.updatedAt !== sync.lastSyncedAt)
     setStatus('未同期の変更があります（最終同期 ' + stamp(sync.lastSyncAt) + '）', 'pend');
   else setStatus('同期済み ' + stamp(sync.lastSyncAt), 'ok');
@@ -2135,13 +2146,14 @@ function runSync(manual) {
     // 取り込むと手元の明細が減る／手元を空にして送る場合は必ず確認する
     const shrink = remote.records.length < db.records.length;
     const emptyPush = !db.records.length && remote.records.length > 0;
-    if (shrink || emptyPush) return askConflict(remote);
+    if (shrink || emptyPush) return needsChoice(remote, manual);
 
     if (!localChanged) return applyRemote(remote);
     if (!remoteChanged) return pushRemote();
-    return askConflict(remote);
+    return needsChoice(remote, manual);
   }).then(m => {
     syncing = false;
+    if (m !== null) NEEDS_CHOICE = false;   // 選ぶ必要が無くなった
     idleStatus();
     if (m && manual) msg($('syncMsg'), esc(m), 'ok');
   }).catch(err => {
