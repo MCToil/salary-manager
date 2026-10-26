@@ -530,8 +530,9 @@
       <select id="fModel"></select>
       <div class="hint" id="modelNote"></div>
       <div class="hint">
-        両モデルとも高解像度ビジョン（長辺2576px）に対応しています。まず Sonnet 5 で試し、
-        読み取りが怪しければ Opus 5 に切り替えるのが安上がりです。<br>
+        最新の3モデルはいずれも高解像度ビジョン（長辺2576px）に対応しています。
+        安いモデルに切り替える前に、画像取込タブの「モデル比較」で同じ明細を読ませて
+        数字が一致するか確かめてください。<br>
         AI取込した明細には使用モデルが記録され、一覧のバッジに表示されます。
       </div>
     </div>
@@ -563,19 +564,34 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-08-03c';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-10-27a';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
-// hires : 高解像度ビジョン（長辺2576px）に対応するか
+// hires : 高解像度ビジョン（長辺2576px）に対応するか（4.7 以降のモデル）
+// legacy: 旧世代。比較用に残しているだけで、新規には勧めない
+// モデル ID は固定スナップショットなので、新モデルが出ても自動では切り替わらない。
 const MODELS = [
-  { id: 'claude-opus-5', label: 'Claude Opus 5（推奨）', short: 'Opus 5', effort: true, hires: true,
-    note: '$5 / $25 per MTok。明細1枚あたり9円前後。読み取り精度優先。' },
-  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', short: 'Sonnet 5', effort: true, hires: true,
-    note: '$2 / $10 per MTok（2026-08-31まで。以降 $3 / $15）。明細1枚あたり4円前後。' },
-  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5（実験用）', short: 'Haiku 4.5', effort: false, hires: false,
-    note: '$1 / $5 per MTok。明細1枚あたり1円前後。ただし画像が長辺1568pxに縮小されるため、'
-        + '小さな文字や桁の読み違いが起きやすい。保存前に必ず数字を確認してください。' }
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5（推奨）', short: 'Opus 5.5', effort: true, hires: true,
+    note: '$4 / $20 per MTok。明細1枚あたり7円前後。読み取り精度優先。' },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', short: 'Sonnet 5.5', effort: true, hires: true,
+    note: '$2 / $10 per MTok。明細1枚あたり4円前後。' },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', short: 'Haiku 5.5', effort: true, hires: true,
+    note: '$0.10 / $0.50 per MTok（入力10万トークン以下の場合。明細の読み取りは常にこの範囲）。'
+        + '明細1枚あたり1円未満。高解像度対応だが、精度は比較機能で確かめてから常用を。' },
+  { id: 'claude-opus-5', label: 'Claude Opus 5（旧）', short: 'Opus 5', effort: true, hires: true, legacy: true,
+    note: '旧世代。$5 / $25 per MTok。Opus 5.5 のほうが新しく安い。' },
+  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5（旧）', short: 'Sonnet 5', effort: true, hires: true, legacy: true,
+    note: '旧世代。$3 / $15 per MTok。Sonnet 5.5 のほうが新しく安い。' },
+  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5（旧）', short: 'Haiku 4.5', effort: false, hires: false, legacy: true,
+    note: '旧世代。$1 / $5 per MTok。画像が長辺1568pxに縮小されるため、'
+        + '小さな文字や桁の読み違いが起きやすい。Haiku 5.5 のほうが新しく安い。' }
 ];
-const DEFAULT_MODEL = 'claude-opus-5';
+const DEFAULT_MODEL = 'claude-opus-5-5';
+// 旧モデルを選んでいた端末は、一度だけ同じ系統の 5.5 へ移す
+const SUCCESSOR = {
+  'claude-opus-5': 'claude-opus-5-5',
+  'claude-sonnet-5': 'claude-sonnet-5-5',
+  'claude-haiku-4-5': 'claude-haiku-5-5'
+};
 const CATS = ['earnings', 'deductions', 'attendance', 'info'];
 const CAT_LABEL = { earnings: '支給', deductions: '控除', attendance: '勤怠', info: '参考' };
 // 課税対象額のように、控除欄に印字されていても控除ではない金額。
@@ -625,10 +641,21 @@ function settings() {
   try {
     const d = JSON.parse(localStorage.getItem(SKEY) || 'null');
     if (d && typeof d === 'object') {
-      return { apiKey: String(d.apiKey || ''), model: String(d.model || DEFAULT_MODEL) };
+      return { apiKey: String(d.apiKey || ''), model: String(d.model || DEFAULT_MODEL),
+               migrated55: !!d.migrated55 };
     }
   } catch (e) { /* 壊れていれば初期値 */ }
-  return { apiKey: '', model: DEFAULT_MODEL };
+  return { apiKey: '', model: DEFAULT_MODEL, migrated55: false };
+}
+// 旧モデルを選んでいた端末を、一度だけ後継モデルへ移す。
+// 移行済みの印を残すので、あとで旧モデルを選び直しても戻されない。
+let migratedFrom = '';
+function migrateModel() {
+  const s = settings();
+  if (s.migrated55) return;
+  if (SUCCESSOR[s.model]) { migratedFrom = s.model; s.model = SUCCESSOR[s.model]; }
+  s.migrated55 = true;
+  try { localStorage.setItem(SKEY, JSON.stringify(s)); } catch (e) { /* 次回また試す */ }
 }
 // 常に保存済みの内容を読み直してから1項目だけ差し替える
 function setSetting(k, v) {
@@ -656,14 +683,17 @@ function modelShort(id) {
 function modelMeta(id) {
   return MODELS.find(x => x.id === id) || MODELS[0];
 }
-// Sonnet 5 は 2026-08-31 まで導入価格 $2/$10、以降 $3/$15
-function rateOf(id) {
-  if (id === 'claude-sonnet-5') {
-    return new Date() < new Date('2026-09-01T00:00:00Z') ? { in: 2, out: 10 } : { in: 3, out: 15 };
-  }
-  if (id === 'claude-haiku-4-5') return { in: 1, out: 5 };
-  return { in: 5, out: 25 };
-}
+// 単価（USD / 100万トークン）。2026-10 時点の公式価格。
+// Haiku 5.5 は入力10万トークン以下の価格（明細の読み取りは常にこの範囲に収まる）
+const RATES = {
+  'claude-opus-5-5':   { in: 4,   out: 20 },
+  'claude-sonnet-5-5': { in: 2,   out: 10 },
+  'claude-haiku-5-5':  { in: 0.1, out: 0.5 },
+  'claude-opus-5':     { in: 5,   out: 25 },
+  'claude-sonnet-5':   { in: 3,   out: 15 },
+  'claude-haiku-4-5':  { in: 1,   out: 5 }
+};
+function rateOf(id) { return RATES[id] || RATES[DEFAULT_MODEL]; }
 function estCost(id, u) {
   const r = rateOf(id);
   return '$' + ((num(u.input_tokens) * r.in + num(u.output_tokens) * r.out) / 1e6).toFixed(4);
@@ -1430,7 +1460,7 @@ const RECORD_SCHEMA = {
 // 渡した画像に明細が何通含まれるかは事前に分からないので、常に配列で受け取る。
 // 同じ明細の複数ページなら1件、別々の明細なら件数ぶん返させる。
 // ---------- モデル比較 ----------
-const cmpSel = new Set(['claude-opus-5', 'claude-sonnet-5']);
+const cmpSel = new Set(['claude-opus-5-5', 'claude-sonnet-5-5']);
 
 function renderCmpPick() {
   $('cmpPick').innerHTML = MODELS.map(m =>
@@ -1835,8 +1865,11 @@ $('btnJsonImport').onclick = () => {
 function renderSettings() {
   fillSyncForm();
   $('fApiKey').value = settings().apiKey;
-  $('fModel').innerHTML = MODELS.map(m =>
-    '<option value="' + m.id + '"' + (m.id === modelId() ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('');
+  const opt = m => '<option value="' + m.id + '"' + (m.id === modelId() ? ' selected' : '') + '>' +
+    esc(m.label) + '</option>';
+  $('fModel').innerHTML =
+    '<optgroup label="最新">' + MODELS.filter(m => !m.legacy).map(opt).join('') + '</optgroup>' +
+    '<optgroup label="旧世代（比較用）">' + MODELS.filter(m => m.legacy).map(opt).join('') + '</optgroup>';
   renderModelNote();
   $('masterList').innerHTML = CATS.map(c => {
     const items = db.master[c];
@@ -1858,8 +1891,12 @@ function renderSettings() {
 function renderModelNote() {
   const m = modelMeta(modelId());
   const body = '<code>' + m.id + '</code> — ' + esc(m.note);
-  $('modelNote').innerHTML = m.hires ? body
-    : '<div class="msg err" style="margin-top:10px">' + body + '</div>';
+  const moved = migratedFrom
+    ? '<div class="msg ok" style="margin-top:10px">新しいモデルが出たため、'
+      + esc(modelShort(migratedFrom)) + ' から ' + esc(m.short) + ' に切り替えました。'
+      + '旧モデルも「旧世代」から選べます。</div>' : '';
+  $('modelNote').innerHTML = (m.hires && !m.legacy ? body
+    : '<div class="msg err" style="margin-top:10px">' + body + '</div>') + moved;
 }
 function renderImportHint() {
   $('importHint').innerHTML = settings().apiKey
@@ -2345,6 +2382,7 @@ function renderAll() {
 $('fKind').innerHTML = KINDS.map(k => '<option value="' + k.v + '">' + k.t + '</option>').join('');
 $('buildTag').textContent = BUILD;
 renderCmpPick();
+migrateModel();
 clearForm();
 renderDatalists();
 renderImportHint();
