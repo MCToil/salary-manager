@@ -449,6 +449,22 @@
       <div id="chart"></div>
     </div>
     <div class="card">
+      <div class="card-title">年ごとの比較</div>
+      <div class="grid g2" style="margin-bottom:12px">
+        <div><label>比べる項目</label><select id="yoyPick"></select></div>
+        <div><label>区切り</label>
+          <select id="yoyBasis">
+            <option value="cal">暦年（1月〜12月）</option>
+            <option value="fy">年度（4月〜翌3月）</option>
+          </select></div>
+      </div>
+      <div id="yoyLegend" class="att-chips" style="margin-bottom:10px"></div>
+      <div id="yoyChart"></div>
+      <div class="scroll-x" style="margin-top:14px"><div id="yoyTable"></div></div>
+      <div class="hint">凡例の年をタップすると表示・非表示を切り替えられます。
+        前年比は、両方の年にデータがある月だけを足し合わせて比べています（今年が9月までなら、前年も1〜9月で比較）。</div>
+    </div>
+    <div class="card">
       <div class="card-title">小項目の推移</div>
       <select id="trendPick" style="margin-bottom:14px"></select>
       <div id="trendKpi" class="kpi" style="margin-bottom:14px"></div>
@@ -564,7 +580,7 @@
 'use strict';
 
 const KEY = 'salary-manager-v1';
-const BUILD = '2026-10-27a';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
+const BUILD = '2026-10-27b';   // 設定タブ末尾に表示。キャッシュで古い版を見ていないかの確認用
 // effort: output_config.effort に対応するか（Haiku 4.5 は送るとエラーになる）
 // hires : 高解像度ビジョン（長辺2576px）に対応するか（4.7 以降のモデル）
 // legacy: 旧世代。比較用に残しているだけで、新規には勧めない
@@ -1136,6 +1152,7 @@ function upsert(rec) {
 
 // ---------- 集計 ----------
 function renderStats() {
+  renderYoY();   // 全期間が対象なので、表示中の年にデータが無くても描く
   const recs = yearRecords(year);
   if (!recs.length) {
     $('chart').innerHTML = '<div class="empty">' + year + '年のデータがありません</div>';
@@ -1301,6 +1318,166 @@ function renderTrend() {
 }
 
 $('trendPick').onchange = () => { trendSel = $('trendPick').value; renderTrend(); };
+
+// ---------- 年ごとの比較 ----------
+// 画面上部の年送りとは無関係に、登録済みの全期間を対象にする
+let yoyMetric = 'total|gross';   // "total|gross|net|deduction" か "cat|name"
+let yoyBasis = 'cal';            // cal=暦年（1〜12月） / fy=年度（4月〜翌3月）
+const yoyHidden = new Set();
+const YOY_COLORS = ['#7986cb', '#26a69a', '#ffb74d', '#ef5350', '#ba68c8', '#4dd0e1', '#aed581'];
+const TOTAL_LABEL = { gross: '総支給', net: '手取り', deduction: '控除合計' };
+
+// 明細の年月を「どの年の何番目の月か」に置き換える
+function yoyPos(ym) {
+  const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
+  if (yoyBasis === 'fy') return m >= 4 ? { y: y, i: m - 4 } : { y: y - 1, i: m + 8 };
+  return { y: y, i: m - 1 };
+}
+function yoyMonthLabels() {
+  return yoyBasis === 'fy' ? [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3] : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+}
+function yoyYearLabel(y) { return yoyBasis === 'fy' ? y + '年度' : y + '年'; }
+
+// 年ごとに12か月ぶんの値を作る。その月に該当が無ければ null（0 とは区別する）
+function yoySeries() {
+  const [kind, key] = [yoyMetric.split('|')[0], yoyMetric.slice(yoyMetric.indexOf('|') + 1)];
+  const byYear = {};
+  let unit = '';
+  db.records.forEach(r => {
+    if (!/^\d{4}-\d{2}/.test(r.ym || '')) return;
+    let v = null;
+    if (kind === 'total') {
+      v = totals(r)[key];
+    } else {
+      const hits = (r[kind] || []).filter(it => it.name === key);
+      if (hits.length) {
+        v = hits.reduce((a, it) => a + num(it.amount), 0);
+        if (hits[0].unit) unit = hits[0].unit;
+      }
+    }
+    if (v === null) return;
+    const p = yoyPos(r.ym);
+    if (!byYear[p.y]) byYear[p.y] = new Array(12).fill(null);
+    byYear[p.y][p.i] = (byYear[p.y][p.i] || 0) + v;   // 給与＋賞与など同月は合算
+  });
+  const years = Object.keys(byYear).map(Number).sort((a, b) => a - b);
+  return { years: years, byYear: byYear, unit: unit };
+}
+
+function renderYoYPick() {
+  const groups = trendOptions(db.records);
+  const all = ['total|gross', 'total|net', 'total|deduction'];
+  groups.forEach(g => g.names.forEach(n => all.push(g.cat + '|' + n)));
+  if (!all.includes(yoyMetric)) yoyMetric = 'total|gross';
+  const opt = (v, t) => '<option value="' + esc(v) + '"' + (v === yoyMetric ? ' selected' : '') + '>' + esc(t) + '</option>';
+  $('yoyPick').innerHTML =
+    '<optgroup label="合計">' + Object.keys(TOTAL_LABEL).map(k => opt('total|' + k, TOTAL_LABEL[k])).join('') + '</optgroup>' +
+    groups.map(g => '<optgroup label="' + CAT_LABEL[g.cat] + '">' +
+      g.names.map(n => opt(g.cat + '|' + n, n)).join('') + '</optgroup>').join('');
+  $('yoyBasis').value = yoyBasis;
+}
+
+function yoySvg(s, shown) {
+  const W = 860, H = 260, PL = 62, PR = 14, PT = 16, PB = 28;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const vals = [];
+  shown.forEach(y => s.byYear[y].forEach(v => { if (v !== null) vals.push(v); }));
+  const max = Math.max(1, ...vals), min = Math.min(0, ...vals), span = Math.max(1, max - min);
+  const x = i => PL + (iw / 11) * i;
+  const yy = v => PT + ih - ih * (v - min) / span;
+  const fmt = v => s.unit ? (Math.round(v * 100) / 100) + s.unit : yen(v);
+  const latest = shown[shown.length - 1];
+
+  let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;display:block">';
+  for (let i = 0; i <= 4; i++) {
+    const gy = PT + ih - ih * i / 4;
+    out += '<line x1="' + PL + '" y1="' + gy + '" x2="' + (W - PR) + '" y2="' + gy + '" stroke="#2e3248"/>' +
+      '<text x="' + (PL - 7) + '" y="' + (gy + 4) + '" fill="#7b82a8" font-size="10" text-anchor="end">' +
+      esc(fmt(min + span * i / 4)) + '</text>';
+  }
+  yoyMonthLabels().forEach((m, i) => {
+    out += '<text x="' + x(i) + '" y="' + (H - 9) + '" fill="#7b82a8" font-size="10" text-anchor="middle">' + m + '</text>';
+  });
+  shown.forEach(y => {
+    const c = YOY_COLORS[s.years.indexOf(y) % YOY_COLORS.length];
+    const w = y === latest ? 2.6 : 1.6;           // 直近の年を太く
+    let seg = [];
+    const flush = () => {
+      if (seg.length > 1) out += '<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + c +
+        '" stroke-width="' + w + '" stroke-linejoin="round"' + (y === latest ? '' : ' opacity=".85"') + '/>';
+      seg = [];
+    };
+    s.byYear[y].forEach((v, i) => { if (v === null) flush(); else seg.push(x(i) + ',' + yy(v)); });
+    flush();
+    s.byYear[y].forEach((v, i) => {
+      if (v === null) return;
+      out += '<circle cx="' + x(i) + '" cy="' + yy(v) + '" r="' + (y === latest ? 3.6 : 2.8) + '" fill="' + c + '">' +
+        '<title>' + esc(yoyYearLabel(y)) + ' ' + yoyMonthLabels()[i] + '月 ' + esc(fmt(v)) + '</title></circle>';
+    });
+  });
+  return out + '</svg>';
+}
+
+function renderYoY() {
+  renderYoYPick();
+  const s = yoySeries();
+  if (!s.years.length) {
+    $('yoyLegend').innerHTML = '';
+    $('yoyChart').innerHTML = '<div class="empty">データがありません</div>';
+    $('yoyTable').innerHTML = '';
+    return;
+  }
+  const shown = s.years.filter(y => !yoyHidden.has(y));
+  const fmt = v => s.unit ? (Math.round(v * 100) / 100) + s.unit : yen(v);
+
+  $('yoyLegend').innerHTML = s.years.map((y, i) => {
+    const on = !yoyHidden.has(y);
+    const c = YOY_COLORS[i % YOY_COLORS.length];
+    return '<span data-y="' + y + '" style="cursor:pointer;' + (on ? '' : 'opacity:.4;') + '">' +
+      '<i style="display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;' +
+      'vertical-align:-1px;background:' + c + '"></i>' + esc(yoyYearLabel(y)) + '</span>';
+  }).join('');
+  $('yoyLegend').querySelectorAll('[data-y]').forEach(el => el.onclick = () => {
+    const y = Number(el.dataset.y);
+    if (yoyHidden.has(y)) yoyHidden.delete(y); else yoyHidden.add(y);
+    renderYoY();
+  });
+
+  $('yoyChart').innerHTML = shown.length ? yoySvg(s, shown)
+    : '<div class="empty">表示する年を選んでください</div>';
+
+  // 年ごとの合計・月平均と前年比。
+  // 前年比は両方の年にデータがある月だけで比べる。途中までしか無い年を
+  // 前年の12か月分と比べると、実態と無関係に大きなマイナスが出てしまうため。
+  const rows = s.years.map((y, k) => {
+    const cur = s.byYear[y];
+    const v = cur.filter(x => x !== null);
+    const total = v.reduce((a, x) => a + x, 0), avg = v.length ? total / v.length : 0;
+    let diff = '<td style="opacity:.4">—</td>';
+    const prev = k > 0 ? s.byYear[s.years[k - 1]] : null;
+    if (prev) {
+      const both = cur.map((x, i) => (x !== null && prev[i] !== null) ? i : -1).filter(i => i >= 0);
+      if (both.length) {
+        const a = both.reduce((t, i) => t + cur[i], 0), b = both.reduce((t, i) => t + prev[i], 0);
+        const d = a - b, p = b ? d / Math.abs(b) * 100 : null;
+        const col = d > 0 ? 'var(--pay)' : d < 0 ? 'var(--ded)' : 'var(--text-dim)';
+        diff = '<td style="color:' + col + '">' + (d > 0 ? '+' : d < 0 ? '−' : '±') + esc(fmt(Math.abs(d))) +
+          (p === null ? '' : '（' + (p > 0 ? '+' : '') + p.toFixed(1) + '%）') +
+          (both.length < 12 ? '<br><span style="font-size:11px;color:var(--text-dim)">' +
+            both.length + 'か月どうしで比較</span>' : '') + '</td>';
+      }
+    }
+    return '<tr><td>' + esc(yoyYearLabel(y)) +
+      (v.length < 12 ? ' <span class="badge">' + v.length + 'か月分</span>' : '') + '</td>' +
+      '<td><b>' + esc(fmt(total)) + '</b></td>' + diff + '<td>' + esc(fmt(avg)) + '</td></tr>';
+  });
+  $('yoyTable').innerHTML = '<table><thead><tr><th>' + (yoyBasis === 'fy' ? '年度' : '年') +
+    '</th><th>合計</th><th>前年比（同じ月どうし）</th><th>月平均</th></tr></thead><tbody>' +
+    rows.reverse().join('') + '</tbody></table>';
+}
+
+$('yoyPick').onchange = () => { yoyMetric = $('yoyPick').value; renderYoY(); };
+$('yoyBasis').onchange = () => { yoyBasis = $('yoyBasis').value; yoyHidden.clear(); renderYoY(); };
 
 function itemTable(recs, cat) {
   const names = [];
